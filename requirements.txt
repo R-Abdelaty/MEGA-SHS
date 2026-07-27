@@ -1,0 +1,4 @@
+langchain[anthropic]>=1.0
+langgraph>=1.0
+python-dotenv>=1.0
+
