@@ -13,7 +13,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, cast
 
 from langchain.tools import tool
 from openpyxl import load_workbook
@@ -492,7 +492,14 @@ class Region:
 
 
 def _table_rows(sheet: Any, table: Any) -> tuple[list[str], list[tuple[int, dict[str, Any]]]]:
-    min_col, min_row, max_col, max_row = range_boundaries(table.ref)
+    # openpyxl types unbounded range edges as ``None``, but Excel tables must
+    # always refer to a concrete rectangle.
+    boundaries = range_boundaries(table.ref)
+    if not all(isinstance(boundary, int) for boundary in boundaries):
+        raise ValueError(f"Table {table.name!r} does not have a bounded range.")
+    min_col, min_row, max_col, max_row = cast(
+        tuple[int, int, int, int], boundaries
+    )
     raw_headers = [
         sheet.cell(row=min_row, column=column).value
         for column in range(min_col, max_col + 1)

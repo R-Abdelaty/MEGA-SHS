@@ -6,7 +6,7 @@ import json
 import re
 from datetime import date, datetime, time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from langchain.tools import tool
 from openpyxl import load_workbook
@@ -476,7 +476,14 @@ def _extract_excel(
             sheet_payload["context"] = context_rows
 
         for table in sheet.tables.values():
-            min_col, min_row, max_col, max_row = range_boundaries(table.ref)
+            # openpyxl's type hints allow ``None`` for unbounded ranges, while an
+            # Excel table always has a concrete rectangular reference.
+            boundaries = range_boundaries(table.ref)
+            if not all(isinstance(boundary, int) for boundary in boundaries):
+                continue
+            min_col, min_row, max_col, max_row = cast(
+                tuple[int, int, int, int], boundaries
+            )
             raw_headers = [
                 sheet.cell(row=min_row, column=column).value
                 for column in range(min_col, max_col + 1)

@@ -1,6 +1,8 @@
 """Self-Healing University Scheduler agent."""
 
+import os
 from pathlib import Path
+
 from dotenv import load_dotenv
 from langchain.agents import create_agent
 from langchain.chat_models import init_chat_model
@@ -21,8 +23,30 @@ from tools import (
 )
 
 
-# Load ANTHROPIC_API_KEY from the local .env file.
-load_dotenv(Path(__file__).with_name(".env"))
+ENV_FILE = Path(__file__).with_name(".env")
+
+
+def _load_anthropic_credentials() -> None:
+    """Load and validate Anthropic credentials before constructing the model."""
+    load_dotenv(ENV_FILE)
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+
+    # python-dotenv does not overwrite an existing environment variable by
+    # default, even when that variable is an empty string. In that case, use
+    # the project-local value explicitly.
+    if not api_key or not api_key.strip():
+        load_dotenv(ENV_FILE, override=True)
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+
+    if not api_key or not api_key.strip():
+        raise RuntimeError(
+            "Anthropic authentication is not configured. Add a nonempty "
+            "ANTHROPIC_API_KEY value to the project .env file or set it in "
+            "the terminal environment before starting agent.py."
+        )
+
+
+_load_anthropic_credentials()
 
 
 # Same model setup used in the GIU AI Connects project.
