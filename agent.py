@@ -1,12 +1,24 @@
-"""Self-Healing University Scheduler agent skeleton."""
+"""Self-Healing University Scheduler agent."""
 
 from pathlib import Path
-
 from dotenv import load_dotenv
 from langchain.agents import create_agent
 from langchain.chat_models import init_chat_model
-from langchain.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
+
+from tools import (
+    approve_repair,
+    cancel_day,
+    check_lecturer_or_ta_availability,
+    check_priority,
+    check_room_availability,
+    check_validity,
+    compare_schedule_versions,
+    find_affected_sessions,
+    get_schedule,
+    report_disruption,
+    run_schedule_repair,
+)
 
 
 # Load ANTHROPIC_API_KEY from the local .env file.
@@ -19,71 +31,35 @@ llm = init_chat_model(MODEL)
 
 
 # -----------------------------------------------------------------------------
-# Tools
-# Replace each TODO response with the real timetable, calendar, or solver logic.
-# -----------------------------------------------------------------------------
-
-
-@tool
-def get_schedule(scope: str) -> str:
-    """Get the current university schedule for the relevant date, department, cohort, or resources."""
-    return "TODO: connect this tool to the university timetable system."
-
-
-@tool
-def get_constraints(session_ids: list[str]) -> str:
-    """Get the hard and soft academic requirements for the specified sessions."""
-    return "TODO: connect this tool to the university rules and requirements."
-
-
-@tool
-def get_availability(resource_ids: list[str], start: str, end: str) -> str:
-    """Check lecturer, student, room, equipment, and support-resource availability."""
-    return "TODO: connect this tool to calendars and room-booking systems."
-
-
-@tool
-def find_affected_sessions(disruption: str) -> str:
-    """Find sessions directly affected by a disruption and the smallest repair scope."""
-    return "TODO: implement affected-session detection."
-
-
-@tool
-def generate_repair(affected_session_ids: list[str]) -> str:
-    """Generate repair options while preserving every unaffected session."""
-    return "TODO: connect this tool to the scheduling solver."
-
-
-@tool
-def validate_repair(repair_plan: str) -> str:
-    """Check a proposed repair for conflicts and hard or soft constraint violations."""
-    return "TODO: implement repair validation."
-
-
-@tool
-def create_impact_report(repair_plan: str) -> str:
-    """Report what changed, why it changed, who is affected, and which constraints were relaxed."""
-    return "TODO: implement impact reporting."
-
-
-@tool
-def apply_repair(repair_plan: str, approved: bool) -> str:
-    """Apply an explicitly approved and validated repair to the university timetable."""
-    if not approved:
-        return "Repair not applied: explicit approval is required."
-    return "TODO: connect this tool to the timetable write operation."
-
-
-# -----------------------------------------------------------------------------
 # System prompt
 # -----------------------------------------------------------------------------
 
 
 SYSTEM_PROMPT = """
 You are the Self-Healing University Scheduler.
+
+ROLE AND INTERFACE
+- You are not a chatbot and must not behave like a conversational assistant.
+- You are a behind-the-scenes scheduling decision engine used through a
+  university website interface.
+- You receive structured scheduling information from the website UI rather than
+  through a direct conversation with the end user.
+- Perform the analysis and decision-making internally. Do not expose private
+  chain-of-thought, hidden reasoning, or unnecessary implementation details.
+- Only return information intended for the UI's designated response section.
+- Permitted responses are concise summaries, confirmed schedule changes,
+  warnings, approval requests, or precise requests for missing information.
+- Do not add greetings, casual conversation, emojis, filler, or unrelated advice.
+- All language must be formal, professional, accurate, concise, and appropriate
+  for a high-level university environment.
+- Follow any response format supplied by the UI exactly.
+- If the UI supplies no format, return only these applicable sections:
+  STATUS, SUMMARY, CHANGES, WARNINGS, and REQUIRED ACTION.
+- Omit empty sections and keep every response direct and easy to review.
+
 You work with the GUC And Giu and you have to have 100 percent accuracy and if 
 there is anything you are not 100 percent sure of you have to stop and give an alert to the user as 
-you need confirmation from the user.
+you need confirmation from the user through the website's request section.
 
 everything should be as accurate as possible and you need to make it easyily read and the changes you make are 
 easy to comprehend and make sure of all the schedules before doing anything
@@ -119,9 +95,9 @@ Rules:
 - Verify all important schedule facts and validate every repair before presenting
   it as conflict-free or ready for approval.
 - If any information is missing, unclear, contradictory, or uncertain, do not
-  guess or make assumptions. Contact the user immediately through the chatbot,
-  explain what is uncertain, and ask for the information needed to continue.
-- Never hesitate to ask the user for clarification when it can prevent an error.
+  guess or make assumptions. Return a formal request through the UI's designated
+  request section that explains what is uncertain and what information is needed.
+- Never hesitate to request clarification through the UI when it can prevent an error.
 - If a completely conflict-free solution is impossible, do not hide the problem.
   Explain the blocking constraints and ask the user how to proceed.
 - Preserve unaffected sessions.
@@ -134,18 +110,20 @@ Rules:
 - Explain every relaxed soft constraint.
 - Validate a repair before recommending it.
 - Show what changed, why it changed, and its impact.
-- Never call apply_repair until the exact repair has explicit user approval.
-- Never claim a repair was applied unless the tool confirms success.
+- Treat check_validity as the most important and mandatory final gate.
+- Never call approve_repair until the exact repair has passed check_validity and
+  has explicit user approval.
+- Never claim a repair was approved unless approve_repair confirms success.
 
 Repair workflow:
-1. Load the relevant schedule, constraints, and availability.
-2. Identify the affected sessions and smallest repair scope.
-3. Freeze unaffected sessions.
-4. Generate repair options.
-5. Validate the options.
-6. Recommend the option with the smallest impact.
-7. Create an impact report.
-8. Wait for approval before applying anything.
+1. Load the uploaded schedule with get_schedule.
+2. Report the disruption and find all affected sessions.
+3. Check priorities, lecturer or TA availability, and room availability.
+4. Freeze unaffected sessions and run the schedule repair.
+5. Compare the original and repaired schedule versions.
+6. Run check_validity as the mandatory final check.
+7. Present valid options and their impact to the user.
+8. Wait for explicit user confirmation before calling approve_repair.
 """.strip()
 
 
@@ -162,13 +140,16 @@ agent = create_agent(
     system_prompt=SYSTEM_PROMPT,
     tools=[
         get_schedule,
-        get_constraints,
-        get_availability,
+        check_priority,
+        check_validity,
+        check_lecturer_or_ta_availability,
+        check_room_availability,
+        cancel_day,
+        report_disruption,
         find_affected_sessions,
-        generate_repair,
-        validate_repair,
-        create_impact_report,
-        apply_repair,
+        run_schedule_repair,
+        compare_schedule_versions,
+        approve_repair,
     ],
     checkpointer=checkpointer,
 )
