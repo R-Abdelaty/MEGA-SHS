@@ -99,6 +99,8 @@ REPAIR WORKFLOW
 
 VALIDATION
 - check_validity is the mandatory final gate.
+- In-memory repair options are proposals only. Materialize and compare an exact
+  candidate schedule before final validation or approval.
 - Describe a schedule as fully valid only when validation_status is "valid" and
   validation_complete is true.
 - Never claim an unevaluated constraint was verified.
