@@ -19,6 +19,8 @@ from langchain.tools import tool
 from openpyxl import load_workbook
 from openpyxl.utils import range_boundaries
 
+from knowledge_base import load_deterministic_rules
+
 from .get_schedule import FAKE_DATA_DIR
 
 
@@ -32,12 +34,7 @@ DAY_NAMES = {
     "saturday",
     "sunday",
 }
-DEFAULT_RULES: dict[str, Any] = {
-    "teaching_weeks": list(range(1, 13)),
-    "final_exam_start_times": ["09:00", "14:00"],
-    "preferred_quiz_periods": ["1", "5"],
-    "quiz_period_rule_is_hard": False,
-}
+DEFAULT_RULES: dict[str, Any] = load_deterministic_rules()
 ALLOWED_ROLES = {
     "sessions",
     "doctor_sessions",
@@ -223,6 +220,152 @@ def _error(code: str, message: str, **details: Any) -> str:
     if details:
         payload["error"]["details"] = details
     return _json(payload)
+
+
+def _evidence_values(
+    evidence: list[dict[str, Any]], field_name: str
+) -> list[str]:
+    values: list[str] = []
+    for item in evidence:
+        raw_value = item.get(field_name)
+        candidates = raw_value if isinstance(raw_value, list) else [raw_value]
+        for candidate in candidates:
+            text = str(candidate or "").strip()
+            if text and text.casefold() not in {
+                existing.casefold() for existing in values
+            }:
+                values.append(text)
+    return values
+
+
+def _shared_evidence_values(
+    evidence: list[dict[str, Any]], field_name: str
+) -> list[str]:
+    if not evidence:
+        return []
+    value_sets = [
+        {
+            str(value).strip().casefold()
+            for value in (
+                item.get(field_name)
+                if isinstance(item.get(field_name), list)
+                else [item.get(field_name)]
+            )
+            if str(value or "").strip()
+        }
+        for item in evidence
+    ]
+    shared = set.intersection(*value_sets) if value_sets else set()
+    return sorted(shared)
+
+
+def _issue_context(issue: dict[str, Any]) -> str:
+    """Summarize the concrete values responsible for one validation issue."""
+    code = str(issue.get("code", ""))
+    evidence = issue.get("evidence")
+    evidence = evidence if isinstance(evidence, list) else []
+    details = issue.get("details")
+    details = details if isinstance(details, dict) else {}
+    parts: list[str] = []
+
+    shared_field_by_code = {
+        "ROOM_DOUBLE_BOOKING": ("rooms", "room"),
+        "INSTRUCTOR_DOUBLE_BOOKING": ("instructors", "instructor"),
+        "STUDENT_GROUP_DOUBLE_BOOKING": ("student_groups", "group"),
+    }
+    if code in shared_field_by_code:
+        field_name, label = shared_field_by_code[code]
+        shared_values = _shared_evidence_values(evidence, field_name)
+        if shared_values:
+            parts.append(f"{label} {', '.join(shared_values)}")
+        session_ids = _evidence_values(evidence, "session_id")
+        if session_ids:
+            parts.append(f"sessions {' & '.join(session_ids)}")
+    elif code == "CROSS_MAJOR_SUPPORT_SESSION":
+        major_codes = _evidence_values(evidence, "major_codes")
+        groups = _evidence_values(evidence, "student_groups")
+        if major_codes:
+            parts.append(f"majors {', '.join(major_codes)}")
+        if groups:
+            parts.append(f"groups {', '.join(groups)}")
+    elif code == "ROOM_CAPACITY_EXCEEDED":
+        rooms = _evidence_values(evidence, "rooms")
+        if rooms:
+            parts.append(f"room {', '.join(rooms)}")
+        expected = details.get("expected_students")
+        capacity = details.get("available_capacity")
+        if expected is not None and capacity is not None:
+            parts.append(f"{expected} students > {capacity} seats")
+    elif code == "INVALID_FINAL_EXAM_TIME":
+        starts = _evidence_values(evidence, "start")
+        allowed = details.get("allowed_start_times")
+        if starts:
+            parts.append(f"starts {', '.join(starts)}")
+        if isinstance(allowed, list) and allowed:
+            parts.append(f"allowed {' or '.join(str(value) for value in allowed)}")
+    elif code == "NON_PREFERRED_QUIZ_PERIOD":
+        starts = _evidence_values(evidence, "start")
+        preferred = details.get("preferred_periods")
+        if starts:
+            parts.append(f"starts {', '.join(starts)}")
+        if isinstance(preferred, list) and preferred:
+            parts.append(
+                f"preferred periods {' or '.join(str(value) for value in preferred)}"
+            )
+
+    days = _evidence_values(evidence, "day")
+    dates = _evidence_values(evidence, "date")
+    starts = _evidence_values(evidence, "start")
+    ends = _evidence_values(evidence, "end")
+    if dates:
+        parts.append(f"date {', '.join(dates)}")
+    elif days:
+        parts.append(f"day {', '.join(days)}")
+    if starts and ends and code not in {
+        "INVALID_FINAL_EXAM_TIME",
+        "NON_PREFERRED_QUIZ_PERIOD",
+    }:
+        parts.append(f"time {starts[0]}-{ends[0]}")
+
+    rows = _evidence_values(evidence, "row")
+    if rows:
+        parts.append(f"rows {', '.join(rows)}")
+    return "; ".join(parts) or "see validator evidence"
+
+
+def _concise_response(
+    validation_status: str,
+    issues: list[dict[str, Any]],
+    incomplete_reasons: list[str],
+    issues_truncated: bool,
+) -> str:
+    """Build the exact short response shown for a validity-only request."""
+    if validation_status == "valid":
+        return "Valid schedule"
+
+    if validation_status == "invalid":
+        lines: list[str] = []
+        seen_issues: set[tuple[str, str]] = set()
+        for issue in issues:
+            if issue.get("severity") not in {"error", "warning"}:
+                continue
+            code = str(issue["code"])
+            message = str(issue["message"])
+            issue_key = (code, message)
+            if issue_key in seen_issues:
+                continue
+            seen_issues.add(issue_key)
+            lines.append(f"- {code} [{_issue_context(issue)}]: {message}")
+        if issues_truncated:
+            lines.append("- ADDITIONAL_ERRORS: More errors were found but not returned.")
+        return "\n--------------------------------\n".join(lines)
+
+    reasons = incomplete_reasons or [
+        "The schedule could not be fully validated."
+    ]
+    return "\n--------------------------------\n".join(
+        f"- VALIDATION_INCOMPLETE: {reason}" for reason in reasons
+    )
 
 
 def _normalize_label(value: Any) -> str:
@@ -1607,15 +1750,36 @@ def check_validity(
 ) -> str:
     """Normalize user schedule files and exhaustively check them for conflicts.
 
-    Call once with the relevant file names. The result contains source profiles
-    and ``mapping_requests`` when unfamiliar headers cannot be understood
-    safely. In that case, inspect the source with ``get_schedule``, ask the user
-    to confirm uncertain meanings, and call this tool again with
-    ``column_mappings``. Mapping keys may be a file name, ``file::sheet``, or the
-    exact ``source_key`` returned by this tool. Each mapping maps canonical
-    fields such as ``room_id`` or ``student_groups`` to uploaded headers and may
-    include ``_role`` set to sessions, doctor_sessions, rooms,
-    room_availability, periods, staff_directory, or ignore.
+    Supply every authoritative current source relevant to the requested scope in
+    one call. For a complete university validation this normally includes the
+    general, room, doctor, and exam schedules, plus enrollment/equipment sources
+    when needed. If the user explicitly names files, validate exactly those
+    files. Do not include two alternative versions of one schedule unless the
+    request is a comparison.
+
+    First call without ``column_mappings`` so familiar headers are mapped
+    automatically. If ``mapping_requests`` are returned, inspect the exact
+    source and headers with ``get_schedule``. Then obtain confirmation for any
+    uncertain meaning and call this tool again with confirmed mappings. Mapping
+    keys may be a file name, ``file::sheet``, or the exact returned
+    ``source_key``. Canonical fields include ``room_id``, ``course_id``,
+    ``student_groups``, ``instructor``, ``day``, ``start``, and ``end``.
+    ``_role`` may be ``sessions``, ``doctor_sessions``, ``rooms``,
+    ``room_availability``, ``periods``, ``staff_directory``, or ``ignore``.
+    Never use ``ignore`` merely to force validation to pass.
+
+    Custom ``rules`` may only come from confirmed user input or retrieved
+    university policy. Never infer a mapping, role, time, capacity, or policy.
+    ``invalid`` means confirmed problems exist. ``inconclusive`` or
+    ``validation_complete == false`` means more data, mapping, or confirmation
+    is required. A schedule is fully valid only when ``validation_status`` is
+    ``valid`` and ``validation_complete`` is true.
+
+    Use each issue's file, sheet, region, row, and details as evidence when
+    explaining or repairing it. Do not claim that a check listed as not run or a
+    constraint listed as unevaluated was verified. After any repair, call this
+    tool again on the exact repaired sources. For a validity-only user request,
+    return the tool's ``concise_response`` exactly.
     """
     if not schedule_files:
         return _error(
@@ -2049,12 +2213,20 @@ def check_validity(
 
     source_profiles = _compact_source_profiles(regions)
     mapping_requests = _compact_mapping_requests(mapping_requests)
+    issues_truncated = collector.total > len(collector.items)
+    concise_response = _concise_response(
+        validation_status,
+        collector.items,
+        incomplete_reasons,
+        issues_truncated,
+    )
 
     return _json(
         {
             "status": "ok",
             "validation_status": validation_status,
             "validation_complete": validation_complete,
+            "concise_response": concise_response,
             "summary": {
                 "requested_file_count": len(schedule_files),
                 "workbooks_read": len(resolved_paths) - len(extraction_errors),
@@ -2067,7 +2239,7 @@ def check_validity(
                 "room_inventory_records": len(room_inventory),
                 "total_issues": collector.total,
                 "returned_issues": len(collector.items),
-                "issues_truncated": collector.total > len(collector.items),
+                "issues_truncated": issues_truncated,
                 "issues_by_severity": dict(collector.severity_counts),
                 "issues_by_code": dict(collector.counts),
             },

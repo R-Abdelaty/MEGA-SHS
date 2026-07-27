@@ -1,0 +1,82 @@
+{
+  "version": 1,
+  "categories": [
+    {
+      "category": "session_priorities",
+      "title": "Session Priority Policy",
+      "file": "session_priorities.md",
+      "policy_status": "configured",
+      "keywords": ["priority", "quiz", "exam", "lecture", "tutorial", "lab", "disruption"]
+    },
+    {
+      "category": "course_sharing",
+      "title": "Course and Lecture Sharing Policy",
+      "file": "course_sharing.md",
+      "policy_status": "configured",
+      "keywords": ["shared", "sharing", "lecture", "course", "major", "cross-major"]
+    },
+    {
+      "category": "cohort_rules",
+      "title": "Tutorial, Lab, and Cohort Rules",
+      "file": "cohort_rules.md",
+      "policy_status": "configured_with_placeholders",
+      "keywords": ["cohort", "group", "tutorial", "lab", "merge", "redistribute", "transfer"]
+    },
+    {
+      "category": "cancellation_compensation",
+      "title": "Cancellation and Compensation Procedure",
+      "file": "cancellation_compensation.md",
+      "policy_status": "configured_with_placeholders",
+      "keywords": ["cancel", "cancelled", "canceled", "compensation", "makeup", "day off", "disruption"]
+    },
+    {
+      "category": "room_rules",
+      "title": "Room Assignment Rules",
+      "file": "room_rules.md",
+      "policy_status": "configured",
+      "keywords": ["room", "capacity", "venue", "availability", "double booking", "relocation"]
+    },
+    {
+      "category": "equipment_rules",
+      "title": "Equipment Rules",
+      "file": "equipment_rules.md",
+      "policy_status": "configured_with_placeholders",
+      "keywords": ["equipment", "lab", "computer", "device", "resource", "compatibility"]
+    },
+    {
+      "category": "exam_rules",
+      "title": "Exam and Quiz Rules",
+      "file": "exam_rules.md",
+      "policy_status": "configured",
+      "keywords": ["exam", "quiz", "final", "assessment", "09:00", "14:00", "period"]
+    },
+    {
+      "category": "instructor_rules",
+      "title": "Instructor and TA Rules",
+      "file": "instructor_rules.md",
+      "policy_status": "configured_with_placeholders",
+      "keywords": ["instructor", "lecturer", "doctor", "ta", "staff", "availability", "workload"]
+    },
+    {
+      "category": "student_conflict_rules",
+      "title": "Student Conflict Rules",
+      "file": "student_conflict_rules.md",
+      "policy_status": "configured_with_placeholders",
+      "keywords": ["student", "cohort", "conflict", "overlap", "day off", "attendance"]
+    },
+    {
+      "category": "fairness_accessibility",
+      "title": "Fairness, Accessibility, and Sustainability",
+      "file": "fairness_accessibility.md",
+      "policy_status": "placeholders_require_confirmation",
+      "keywords": ["fairness", "accessibility", "accessible", "sustainability", "accommodation", "equity"]
+    },
+    {
+      "category": "university_procedures",
+      "title": "GUC and GIU Scheduling Procedures",
+      "file": "university_procedures.md",
+      "policy_status": "configured_with_placeholders",
+      "keywords": ["guc", "giu", "procedure", "period", "timetable", "schedule", "break", "semester"]
+    }
+  ]
+}

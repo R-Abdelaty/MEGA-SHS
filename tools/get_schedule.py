@@ -806,15 +806,30 @@ def get_schedule(
 ) -> str:
     """Extract AI-ready data from an Excel or PDF file in the fake data folder.
 
-    Supply an exact file name when possible. For Excel files, use ``filters`` for
-    reliable AND conditions across columns, for example
-    ``{"student_groups": "ARC", "session_type": "Tutorial", "day": "Sunday"}``.
-    ``query`` accepts natural search terms that may occur in different cells.
-    Use ``row_offset`` with the returned ``next_row_offset`` when ``has_more`` is
-    true. Without a query or filters, the tool returns the workbook index and a
-    useful first sheet. For PDFs, optionally provide a one-based ``page_number``
-    or ``query``. Results are structured JSON and bounded by row, page, and
-    character limits.
+    Set ``uploaded_file_path`` to the exact schedule file name when possible.
+    Never infer a file's contents from its name. If the correct Excel worksheet
+    is unknown, call with the file name first and use the returned workbook
+    discovery/index before selecting ``sheet_name``.
+
+    Use ``filters`` for precise or exhaustive Excel retrieval. Filters use AND
+    logic and may reference exact uploaded headers or supported canonical fields:
+    ``student_groups``, ``session_type``, ``day``, ``major``, ``course``,
+    ``room``, ``instructor``, ``period``, and ``week``. ``query`` is a
+    natural-text row search and should not replace column filters when several
+    exact conditions must all match. Example:
+    ``filters={"student_groups": "ARC", "session_type": "Tutorial",
+    "day": "Sunday"}``.
+
+    For an exhaustive request, verify
+    ``extraction.matching_rows_found == extraction.matching_rows_returned`` and
+    ``extraction.has_more == false``. When ``extraction.has_more`` is true, call
+    again with ``row_offset`` set to ``extraction.next_row_offset`` until all
+    pages are retrieved. Never describe a partial page as the complete result.
+
+    For PDFs, ``page_number`` is one-based. Use a page number for a known page or
+    ``query`` to locate relevant text. Respect row, page, and character limits.
+    A response marked truncated, partial, or error is incomplete data: narrow the
+    request or paginate, and never invent the missing content.
     """
     if not FAKE_DATA_DIR.is_dir():
         return _error(
