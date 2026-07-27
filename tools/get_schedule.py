@@ -24,6 +24,65 @@ MAX_PAGE_LIMIT = 50
 DEFAULT_MAX_CHARS = 40_000
 MAX_CHAR_LIMIT = 120_000
 MAX_CELL_CHARS = 2_000
+QUERY_STOP_WORDS = {
+    "all",
+    "at",
+    "for",
+    "from",
+    "get",
+    "in",
+    "of",
+    "on",
+    "show",
+    "the",
+}
+QUERY_SYNONYMS = {
+    "tut": "tutorial",
+    "tuts": "tutorial",
+    "tutorials": "tutorial",
+    "lectures": "lecture",
+    "labs": "lab",
+}
+FILTER_HEADER_PREFERENCES: dict[str, list[str]] = {
+    "student groups": [
+        "Cohort Group(s)",
+        "Student Group(s)",
+        "Tutorial Group(s)",
+        "Group ID",
+        "Section",
+    ],
+    "session type": [
+        "Session Type",
+        "Activity Type",
+        "Assessment Type",
+        "Exam Type",
+    ],
+    "day": ["Day", "Weekday", "Day of Week"],
+    "major": ["Major Code(s)", "Major(s)", "Major", "Program"],
+    "course": ["Course ID", "Course Code", "Course Name", "Subject", "Module"],
+    "room": ["Room", "Room ID", "Venue", "Location", "Hall", "Lab"],
+    "instructor": ["Instructor", "Lecturer", "Doctor", "Staff", "Teacher", "TA"],
+    "period": ["Period ID", "Period", "Slot", "Time Slot"],
+    "week": ["Week", "Weeks", "Teaching Week", "Semester Week"],
+}
+FILTER_KEY_ALIASES = {
+    "activity": "session type",
+    "activity type": "session type",
+    "assessment type": "session type",
+    "class type": "session type",
+    "cohort": "student groups",
+    "cohort group": "student groups",
+    "cohort groups": "student groups",
+    "group": "student groups",
+    "groups": "student groups",
+    "section": "student groups",
+    "student group": "student groups",
+    "student groups": "student groups",
+    "tutorial group": "student groups",
+    "tutorial groups": "student groups",
+    "type": "session type",
+    "weekday": "day",
+}
 
 
 def _json(data: dict[str, Any]) -> str:
@@ -166,11 +225,131 @@ def _safe_value(value: Any) -> Any:
     return text
 
 
-def _row_matches(values: list[Any], query: str | None) -> bool:
+def _normalize_label(value: Any) -> str:
+    text = str(value or "").strip().casefold()
+    text = re.sub(r"[()]", "", text)
+    text = re.sub(r"[/_\-]+", " ", text)
+    return re.sub(r"[^a-z0-9]+", " ", text).strip()
+
+
+def _query_terms(query: str | None) -> list[list[str]]:
+    """Turn a natural query into required terms with small schedule synonyms."""
     if not query:
+        return []
+
+    raw_terms = [
+        quoted or plain
+        for quoted, plain in re.findall(r'"([^"]+)"|(\S+)', query)
+    ]
+    terms: list[list[str]] = []
+    for raw_term in raw_terms:
+        normalized = _normalize_label(raw_term)
+        if not normalized or normalized in QUERY_STOP_WORDS:
+            continue
+        canonical = QUERY_SYNONYMS.get(normalized, normalized)
+        alternatives = {canonical}
+        if canonical.endswith("s") and len(canonical) > 3:
+            alternatives.add(canonical[:-1])
+        terms.append(sorted(alternatives))
+    return terms
+
+
+def _text_matches_query(text: str, query: str | None) -> bool:
+    terms = _query_terms(query)
+    if not terms:
         return True
-    needle = query.casefold()
-    return any(needle in str(value).casefold() for value in values if value is not None)
+    haystack = text.casefold()
+    normalized_haystack = _normalize_label(text)
+    return all(
+        any(
+            alternative in haystack or alternative in normalized_haystack
+            for alternative in term
+        )
+        for term in terms
+    )
+
+
+def _row_matches(values: list[Any], query: str | None) -> bool:
+    haystack = " | ".join(
+        str(value) for value in values if value not in (None, "")
+    )
+    return _text_matches_query(haystack, query)
+
+
+def _resolve_table_filters(
+    headers: list[str],
+    filters: dict[str, str | list[str]] | None,
+    sheet_name: str,
+) -> tuple[dict[str, str], list[str]]:
+    if not filters:
+        return {}, []
+
+    normalized_headers = {
+        _normalize_label(header): header for header in headers
+    }
+    resolved: dict[str, str] = {}
+    unresolved: list[str] = []
+
+    for requested_key in filters:
+        normalized_key = _normalize_label(requested_key)
+        direct = normalized_headers.get(normalized_key)
+        if direct:
+            resolved[requested_key] = direct
+            continue
+
+        canonical_key = FILTER_KEY_ALIASES.get(normalized_key, normalized_key)
+        preferences = FILTER_HEADER_PREFERENCES.get(canonical_key, [])
+        match = next(
+            (
+                normalized_headers[_normalize_label(candidate)]
+                for candidate in preferences
+                if _normalize_label(candidate) in normalized_headers
+            ),
+            None,
+        )
+        if match:
+            resolved[requested_key] = match
+        elif canonical_key == "day" and _normalize_label(sheet_name) in {
+            "monday",
+            "tuesday",
+            "wednesday",
+            "thursday",
+            "friday",
+            "saturday",
+            "sunday",
+        }:
+            resolved[requested_key] = "__sheet_name__"
+        else:
+            unresolved.append(requested_key)
+    return resolved, unresolved
+
+
+def _filter_value_matches(
+    actual: Any,
+    expected: str | list[str],
+) -> bool:
+    expected_values = expected if isinstance(expected, list) else [expected]
+    actual_text = str(actual or "").casefold()
+    return any(
+        str(expected_value).strip().casefold() in actual_text
+        for expected_value in expected_values
+    )
+
+
+def _row_matches_filters(
+    row_by_header: dict[str, Any],
+    filters: dict[str, str | list[str]] | None,
+    resolved_filters: dict[str, str],
+    sheet_name: str,
+) -> bool:
+    if not filters:
+        return True
+    for requested_key, expected in filters.items():
+        header = resolved_filters[requested_key]
+        actual = sheet_name if header == "__sheet_name__" else row_by_header.get(header)
+        if not _filter_value_matches(actual, expected):
+            return False
+    return True
 
 
 def _unique_headers(raw_headers: list[Any]) -> list[str]:
@@ -189,11 +368,13 @@ class _ExtractionBudget:
     def __init__(self, max_rows: int, max_chars: int) -> None:
         self.rows_remaining = max_rows
         # Leave room for workbook metadata and JSON structure.
-        self.chars_remaining = max(2_000, max_chars - 8_000)
+        self.chars_remaining = max(2_000, max_chars - 12_000)
         self.truncated = False
 
     def accept(self, item: Any) -> bool:
-        estimated_chars = len(json.dumps(item, ensure_ascii=False, default=str))
+        estimated_chars = len(
+            json.dumps(item, ensure_ascii=False, indent=2, default=str)
+        )
         if self.rows_remaining <= 0 or estimated_chars > self.chars_remaining:
             self.truncated = True
             return False
@@ -202,10 +383,15 @@ class _ExtractionBudget:
         return True
 
 
-def _resolve_sheet_names(workbook: Any, sheet_name: str | None, query: str | None) -> tuple[list[str], str | None]:
+def _resolve_sheet_names(
+    workbook: Any,
+    sheet_name: str | None,
+    query: str | None,
+    filters: dict[str, str | list[str]] | None,
+) -> tuple[list[str], str | None]:
     names = list(workbook.sheetnames)
     if not sheet_name:
-        if query:
+        if query or filters:
             return names, None
         preferred = next(
             (
@@ -244,18 +430,26 @@ def _extract_excel(
     path: Path,
     sheet_name: str | None,
     query: str | None,
+    filters: dict[str, str | list[str]] | None,
+    row_offset: int,
     max_rows: int,
     max_chars: int,
 ) -> str:
     workbook = load_workbook(path, read_only=False, data_only=True)
-    selected_names, sheet_error = _resolve_sheet_names(workbook, sheet_name, query)
+    selected_names, sheet_error = _resolve_sheet_names(
+        workbook, sheet_name, query, filters
+    )
     if sheet_error:
         workbook.close()
         return sheet_error
 
     budget = _ExtractionBudget(max_rows=max_rows, max_chars=max_chars)
     extracted_sheets: list[dict[str, Any]] = []
-    total_matches = 0
+    total_matches_found = 0
+    total_matches_returned = 0
+    filter_tables_supported = 0
+    filter_resolution_examples: list[dict[str, Any]] = []
+    available_table_columns: list[dict[str, Any]] = []
 
     for name in selected_names:
         sheet = workbook[name]
@@ -281,7 +475,6 @@ def _extract_excel(
         if context_rows:
             sheet_payload["context"] = context_rows
 
-        table_match_count = 0
         for table in sheet.tables.values():
             min_col, min_row, max_col, max_row = range_boundaries(table.ref)
             raw_headers = [
@@ -290,13 +483,45 @@ def _extract_excel(
             ]
             headers = _unique_headers(raw_headers)
             returned_rows: list[dict[str, Any]] = []
+            resolved_filters, unresolved_filters = _resolve_table_filters(
+                headers, filters, name
+            )
+            available_table_columns.append(
+                {
+                    "sheet": name,
+                    "table": table.name,
+                    "columns": headers,
+                }
+            )
+            if filters and unresolved_filters:
+                continue
+            if filters:
+                filter_tables_supported += 1
+                filter_resolution_examples.append(
+                    {
+                        "sheet": name,
+                        "table": table.name,
+                        "resolved_columns": resolved_filters,
+                    }
+                )
 
             for row_number in range(min_row + 1, max_row + 1):
                 raw_values = [
                     sheet.cell(row=row_number, column=column).value
                     for column in range(min_col, max_col + 1)
                 ]
+                row_by_header = dict(zip(headers, raw_values))
                 if not _row_matches(raw_values, query):
+                    continue
+                if not _row_matches_filters(
+                    row_by_header,
+                    filters,
+                    resolved_filters,
+                    name,
+                ):
+                    continue
+                total_matches_found += 1
+                if total_matches_found <= row_offset:
                     continue
                 record = {
                     "excel_row": row_number,
@@ -306,26 +531,24 @@ def _extract_excel(
                     },
                 }
                 if not budget.accept(record):
-                    break
+                    continue
                 returned_rows.append(record)
-                table_match_count += 1
-                total_matches += 1
+                total_matches_returned += 1
 
-            if returned_rows or not query:
+            if returned_rows or (not query and not filters) or (filters and not unresolved_filters):
                 sheet_payload["tables"].append(
                     {
                         "name": table.name,
                         "range": table.ref,
                         "columns": headers,
+                        "filters_resolved_to": resolved_filters or None,
                         "returned_row_count": len(returned_rows),
                         "rows": returned_rows,
                     }
                 )
-            if budget.rows_remaining <= 0:
-                break
 
-        # Fallback for sheets without Excel tables, or for a query not found in tables.
-        if not sheet.tables or (query and table_match_count == 0):
+        # Raw-row fallback is only safe when structured column filters are absent.
+        if not sheet.tables and not filters:
             raw_matches: list[dict[str, Any]] = []
             for row_number in range(1, sheet.max_row + 1):
                 raw_values = [
@@ -341,18 +564,39 @@ def _extract_excel(
                 }
                 if not nonempty_cells:
                     continue
+                total_matches_found += 1
+                if total_matches_found <= row_offset:
+                    continue
                 record = {"excel_row": row_number, "cells": nonempty_cells}
                 if not budget.accept(record):
-                    break
+                    continue
                 raw_matches.append(record)
-                total_matches += 1
+                total_matches_returned += 1
             if raw_matches:
                 sheet_payload["raw_rows"] = raw_matches
 
-        if sheet_payload["tables"] or sheet_payload.get("raw_rows") or not query:
+        if (
+            sheet_payload["tables"]
+            or sheet_payload.get("raw_rows")
+            or (not query and not filters)
+        ):
             extracted_sheets.append(sheet_payload)
-        if budget.rows_remaining <= 0:
-            break
+
+    if filters and filter_tables_supported == 0:
+        workbook.close()
+        return _error(
+            "filters_not_resolved",
+            "No worksheet table contains columns matching all requested filters.",
+            requested_filters=filters,
+            available_tables=available_table_columns[:50],
+            hint=(
+                "Use exact column headers from available_tables or inspect a "
+                "specific worksheet first."
+            ),
+        )
+
+    has_more = total_matches_found > row_offset + total_matches_returned
+    truncated = budget.truncated or has_more
 
     payload = {
         "status": "ok",
@@ -368,20 +612,57 @@ def _extract_excel(
         "request": {
             "sheet_name": sheet_name,
             "query": query,
+            "query_terms": _query_terms(query),
+            "filters": filters,
+            "row_offset": row_offset,
+            "query_scope_warning": (
+                (
+                    "Query terms may match any column. Use structured filters "
+                    "for precise or exhaustive multi-condition requests."
+                )
+                if query and not filters
+                else None
+            ),
         },
         "extraction": {
             "selected_sheets": selected_names,
-            "matching_rows_returned": total_matches,
+            "matching_rows_found": total_matches_found,
+            "matching_rows_returned": total_matches_returned,
+            "matching_rows_skipped_by_offset": min(
+                row_offset, total_matches_found
+            ),
+            "has_more": has_more,
+            "next_row_offset": (
+                row_offset + total_matches_returned
+                if has_more and total_matches_returned
+                else None
+            ),
             "sheets": extracted_sheets,
+        },
+        "filter_diagnostics": {
+            "tables_supporting_all_filters": filter_tables_supported,
+            "resolution_examples": filter_resolution_examples[:20],
         },
         "limits": {
             "max_rows": max_rows,
             "max_chars": max_chars,
-            "truncated": budget.truncated,
+            "truncated": truncated,
             "note": (
-                "Request a specific sheet or add a query to narrow the result."
-                if budget.truncated
-                else None
+                (
+                    "Call again with next_row_offset to retrieve remaining "
+                    "matches, or narrow the filters."
+                )
+                if has_more
+                else (
+                    "Increase max_chars or narrow the filters."
+                    if budget.truncated
+                    else None
+                )
+            ),
+            "completeness": (
+                "complete"
+                if not truncated
+                else "partial"
             ),
         },
     }
@@ -441,10 +722,12 @@ def _extract_pdf(
 
     for page_index in page_indexes:
         text = _clean_pdf_text(reader.pages[page_index].extract_text() or "")
-        if query and query.casefold() not in text.casefold():
+        if query and not _text_matches_query(text, query):
             continue
         if query:
-            text = _query_snippet(text, query)
+            terms = _query_terms(query)
+            snippet_term = terms[0][0] if terms else query
+            text = _query_snippet(text, snippet_term)
         matched_pages += 1
 
         if len(pages) >= max_pages:
@@ -507,6 +790,8 @@ def get_schedule(
     uploaded_file_path: str,
     sheet_name: str | None = None,
     query: str | None = None,
+    filters: dict[str, str | list[str]] | None = None,
+    row_offset: int = 0,
     page_number: int | None = None,
     max_rows: int = DEFAULT_MAX_ROWS,
     max_pages: int = DEFAULT_MAX_PAGES,
@@ -514,12 +799,15 @@ def get_schedule(
 ) -> str:
     """Extract AI-ready data from an Excel or PDF file in the fake data folder.
 
-    Supply an exact file name when possible. For Excel files, optionally provide
-    ``sheet_name`` and/or a case-insensitive ``query`` to narrow the returned
-    table records. Without either, the tool returns the workbook index and its
-    overview/directory/first useful sheet. For PDFs, optionally provide a
-    one-based ``page_number`` or ``query``. Results are structured JSON and are
-    bounded by row, page, and character limits.
+    Supply an exact file name when possible. For Excel files, use ``filters`` for
+    reliable AND conditions across columns, for example
+    ``{"student_groups": "ARC", "session_type": "Tutorial", "day": "Sunday"}``.
+    ``query`` accepts natural search terms that may occur in different cells.
+    Use ``row_offset`` with the returned ``next_row_offset`` when ``has_more`` is
+    true. Without a query or filters, the tool returns the workbook index and a
+    useful first sheet. For PDFs, optionally provide a one-based ``page_number``
+    or ``query``. Results are structured JSON and bounded by row, page, and
+    character limits.
     """
     if not FAKE_DATA_DIR.is_dir():
         return _error(
@@ -552,8 +840,42 @@ def get_schedule(
     max_rows = max(1, min(int(max_rows), MAX_ROW_LIMIT))
     max_pages = max(1, min(int(max_pages), MAX_PAGE_LIMIT))
     max_chars = max(5_000, min(int(max_chars), MAX_CHAR_LIMIT))
+    row_offset = max(0, int(row_offset))
     sheet_name = sheet_name.strip() if sheet_name and sheet_name.strip() else None
     query = query.strip() if query and query.strip() else None
+    filters = filters or None
+    if filters:
+        cleaned_filters: dict[str, str | list[str]] = {}
+        for key, value in filters.items():
+            cleaned_key = str(key).strip()
+            if not cleaned_key:
+                return _error(
+                    "invalid_filter",
+                    "Filter column names cannot be empty.",
+                )
+            if isinstance(value, list):
+                cleaned_values = [
+                    str(item).strip()
+                    for item in value
+                    if str(item).strip()
+                ]
+                if not cleaned_values:
+                    return _error(
+                        "invalid_filter",
+                        "Filter value lists cannot be empty.",
+                        filter=cleaned_key,
+                    )
+                cleaned_filters[cleaned_key] = cleaned_values
+            else:
+                cleaned_value = str(value).strip()
+                if not cleaned_value:
+                    return _error(
+                        "invalid_filter",
+                        "Filter values cannot be empty.",
+                        filter=cleaned_key,
+                    )
+                cleaned_filters[cleaned_key] = cleaned_value
+        filters = cleaned_filters
 
     try:
         if extension in {".xlsx", ".xlsm"}:
@@ -567,10 +889,24 @@ def get_schedule(
                 path=path,
                 sheet_name=sheet_name,
                 query=query,
+                filters=filters,
+                row_offset=row_offset,
                 max_rows=max_rows,
                 max_chars=max_chars,
             )
 
+        if filters is not None:
+            return _error(
+                "filters_not_applicable",
+                "Structured column filters are only valid for Excel files.",
+                file=path.name,
+            )
+        if row_offset:
+            return _error(
+                "row_offset_not_applicable",
+                "row_offset is only valid for Excel files.",
+                file=path.name,
+            )
         if sheet_name is not None:
             return _error(
                 "sheet_not_applicable",
