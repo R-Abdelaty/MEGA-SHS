@@ -6,9 +6,7 @@ import json
 import re
 from datetime import date, datetime, time
 from typing import Any
-
 from langchain.tools import tool
-
 from .get_schedule import get_schedule
 
 

@@ -815,7 +815,7 @@ def get_schedule(
             "The fake data folder does not exist.",
             expected_path=str(FAKE_DATA_DIR),
         )
-
+    print("getScheduleUSED")
     path, resolution_error = _resolve_requested_file(uploaded_file_path)
     if resolution_error:
         return resolution_error

@@ -15,7 +15,9 @@ import pdfplumber
 from langchain.tools import tool
 
 
-SUPPORTED_EXTENSIONS = {".xlsx", ".xls", ".pdf"}
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+FAKE_DATA_DIR = (PROJECT_ROOT / "fake data").resolve()
+SUPPORTED_EXTENSIONS = {".xlsx", ".xlsm", ".xls", ".pdf"}
 
 DAYS = {
     "sun": "sunday",
@@ -176,17 +178,60 @@ def _load_pdf(path: Path) -> list[pd.DataFrame]:
     return tables
 
 
-def _load_tables(file_path: str) -> tuple[Path, list[pd.DataFrame]]:
-    path = Path(file_path).expanduser().resolve()
+def _is_inside(child: Path, parent: Path) -> bool:
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def _resolve_uploaded_file(file_path: str) -> Path:
+    requested_value = str(file_path).strip().strip("\"'")
+    if not requested_value:
+        raise RoomAvailabilityInputError(
+            "The uploaded room schedule file name is missing.",
+            "Provide the exact Excel or PDF file name from the fake data folder.",
+        )
+
+    requested = Path(requested_value)
+    if requested.is_absolute():
+        path = requested.resolve()
+    else:
+        parts = list(requested.parts)
+        if parts and _normalise(parts[0]) == "fake data":
+            parts = parts[1:]
+        path = FAKE_DATA_DIR.joinpath(*parts).resolve()
+
+    if not _is_inside(path, FAKE_DATA_DIR):
+        raise RoomAvailabilityInputError(
+            "The requested room schedule is outside the permitted data folder.",
+            "Select an uploaded Excel or PDF file from the fake data folder.",
+        )
     if not path.is_file():
+        available_files = sorted(
+            item.name
+            for item in FAKE_DATA_DIR.iterdir()
+            if item.is_file()
+            and not item.name.startswith("~$")
+            and item.suffix.casefold() in SUPPORTED_EXTENSIONS
+        ) if FAKE_DATA_DIR.is_dir() else []
         raise RoomAvailabilityInputError(
             "The uploaded room schedule file was not found.",
-            "Upload the file again and provide its current path.",
+            (
+                "Provide an exact file name from the fake data folder. "
+                f"Available files: {', '.join(available_files) or 'none'}."
+            ),
         )
+    return path
+
+
+def _load_tables(file_path: str) -> tuple[Path, list[pd.DataFrame]]:
+    path = _resolve_uploaded_file(file_path)
     if path.suffix.casefold() not in SUPPORTED_EXTENSIONS:
         raise RoomAvailabilityInputError(
             "The uploaded room schedule format is unsupported.",
-            "Upload an Excel (.xlsx or .xls) or PDF (.pdf) file.",
+            "Upload an Excel (.xlsx, .xlsm, or .xls) or PDF (.pdf) file.",
         )
 
     tables = _load_pdf(path) if path.suffix.casefold() == ".pdf" else _load_excel(path)
