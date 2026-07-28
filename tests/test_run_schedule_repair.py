@@ -143,6 +143,17 @@ class RunScheduleRepairTests(unittest.TestCase):
             "Week 2",
         )
 
+    def test_partial_day_rejects_assignment_inside_cancelled_time_block(self) -> None:
+        result = self.invoke(
+            disruption_report=report("partial_day_cancelled"),
+            repair_assignments=[
+                assignment(day="Monday", start="08:30", end="10:00", week=1)
+            ],
+        )
+
+        self.assertEqual(result["status"], "invalid_request")
+        self.assertIn("inside the disruption scope", result["summary"])
+
     def test_room_closure_allows_same_time_only_with_a_different_room(self) -> None:
         closed_room = self.invoke(
             disruption_report=report("room_closed"),

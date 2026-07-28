@@ -198,7 +198,7 @@ def main() -> int:
     arguments = _arguments()
     source_names = [
         "05_General_Schedule.xlsx",
-        "Doctor Schedule Calendar.xlsx",
+        "07_Doctor_Schedule_Calendar.xlsx",
         "01_Room_Schedule.xlsx",
         "06_Exam_Schedule.xlsx",
     ]
@@ -224,11 +224,11 @@ def main() -> int:
         temp_path = Path(temp_name).resolve()
         for source in source_paths:
             shutil.copy2(source, temp_path / source.name)
-        candidate_name = "Monday_Cancellation_Prototype.xlsx"
+        candidate_name = f"{arguments.day}_Cancellation_Prototype.xlsx"
         _write_candidate(
             temp_path / candidate_name,
             prototype_rows,
-            _doctor_names(FAKE_DATA_DIR / "Doctor Schedule Calendar.xlsx"),
+            _doctor_names(FAKE_DATA_DIR / "07_Doctor_Schedule_Calendar.xlsx"),
         )
         validity_module.FAKE_DATA_DIR = temp_path
 
@@ -291,8 +291,20 @@ def main() -> int:
         "source_files_modified": hashes_before != hashes_after,
         "elapsed_seconds": round(time.perf_counter() - started, 2),
     }
+    result["overall_passed"] = all(
+        [
+            result["prototype_status"] == "success",
+            result["affected_session_count"] == result["proposed_session_count"],
+            result["unassigned_session_count"] == 0,
+            result["prototype_passed_supported_conflict_checks"],
+            result["combined_validation_complete"] is True,
+            not result["combined_source_errors"],
+            not result["combined_extraction_errors"],
+            result["source_files_modified"] is False,
+        ]
+    )
     print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
-    return 0 if not result["source_files_modified"] else 3
+    return 0 if result["overall_passed"] else 3
 
 
 if __name__ == "__main__":

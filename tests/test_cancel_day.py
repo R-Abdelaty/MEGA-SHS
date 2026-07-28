@@ -91,6 +91,10 @@ class CancelDayTests(unittest.TestCase):
         self.tutorial = session(
             "S2", "Tutorial", "P2", "10:15", "11:45", "G2", "TA One", "Tutorial Room"
         )
+        self.normal_monday = session(
+            "N1", "Tutorial", "P3", "13:00", "14:30", "G3", "TA Two", "Tutorial Room"
+        )
+        self.normal_monday["day"] = "Monday"
         self.report_tool = FakeTool(
             {
                 "status": "success",
@@ -129,7 +133,9 @@ class CancelDayTests(unittest.TestCase):
         def schedule_response(arguments: dict) -> dict:
             sheet = arguments["sheet_name"]
             if sheet == "Semester Timetable":
-                return extraction_payload([self.lecture, self.tutorial], sheet)
+                return extraction_payload(
+                    [self.lecture, self.tutorial, self.normal_monday], sheet
+                )
             if sheet == "Regular Assessments":
                 return extraction_payload([], sheet)
             if sheet == "Doctor Directory":
@@ -184,7 +190,7 @@ class CancelDayTests(unittest.TestCase):
         ):
             return json.loads(cancel_day.invoke(arguments))
 
-    def test_returns_one_paginated_following_week_prototype(self) -> None:
+    def test_returns_one_paginated_prototype_starting_next_teaching_day(self) -> None:
         result = self.invoke()
 
         self.assertEqual(result["status"], "success")
@@ -193,11 +199,48 @@ class CancelDayTests(unittest.TestCase):
         self.assertEqual(result["unassigned_session_count"], 0)
         timetable = result["prototype_timetable"]
         self.assertEqual(timetable["status"], "pending_user_confirmation")
-        self.assertEqual(timetable["target_academic_weeks"], [2, 3])
+        self.assertEqual(timetable["target_academic_weeks"], [1, 2, 3])
+        self.assertTrue(timetable["compensation_starts_after_cancelled_day"])
         self.assertEqual(timetable["total_compensation_sessions"], 2)
         self.assertEqual(timetable["returned_compensation_sessions"], 1)
         self.assertTrue(timetable["pagination"]["has_more"])
-        self.assertEqual(timetable["sessions"][0]["academic_week"], 2)
+        self.assertEqual(timetable["sessions"][0]["academic_week"], 1)
+        self.assertEqual(timetable["sessions"][0]["day"], "Monday")
+        monday_view = timetable["selected_day_schedule"]
+        self.assertEqual((monday_view["academic_week"], monday_view["day"]), (1, "Monday"))
+        self.assertEqual(monday_view["normal_session_count"], 1)
+        self.assertEqual(monday_view["compensation_session_count"], 2)
+        self.assertEqual(
+            {item["schedule_status"] for item in monday_view["sessions"]},
+            {"normal", "compensation"},
+        )
+        self.assertEqual(
+            {item["display"]["color_name"] for item in monday_view["sessions"]},
+            {"gray", "green"},
+        )
+        slots = {item["period_id"]: item for item in monday_view["slot_groups"]}
+        self.assertEqual(slots["P1"]["compensation_session_count"], 2)
+        self.assertEqual(slots["P2"]["compensation_session_count"], 0)
+        self.assertEqual(slots["P3"]["normal_session_count"], 1)
+        self.assertEqual(slots["P1"]["display"]["color_name"], "green")
+        self.assertEqual(timetable["color_legend"]["cancelled"]["color_name"], "red")
+        monday_summary = next(
+            item
+            for item in timetable["day_views"]
+            if item["academic_week"] == 1 and item["day"] == "Monday"
+        )
+        self.assertTrue(monday_summary["has_compensation"])
+        self.assertEqual(monday_summary["total_session_count"], 3)
+        self.assertTrue(
+            result["constraint_summary"][
+                "remaining_cancelled_week_days_considered_first"
+            ]
+        )
+        self.assertFalse(
+            result["constraint_summary"][
+                "same_or_earlier_cancelled_week_days_allowed"
+            ]
+        )
         self.assertEqual(result["approval"]["status"], "not_requested")
 
     def test_requires_explicit_cancellation_confirmation(self) -> None:
@@ -224,11 +267,86 @@ class CancelDayTests(unittest.TestCase):
             {"S1", "S2"},
         )
 
-    def test_week_twelve_has_no_following_teaching_week(self) -> None:
-        result = self.invoke(academic_week=12)
+    def test_ui_can_select_and_paginate_a_combined_day_view(self) -> None:
+        first = self.invoke(
+            display_academic_week=1,
+            display_day="Monday",
+            display_offset=0,
+            display_limit=1,
+        )
+        report_call_count = len(self.report_tool.calls)
+        second = self.invoke(
+            display_academic_week=1,
+            display_day="Monday",
+            display_offset=1,
+            display_limit=2,
+        )
+
+        first_view = first["prototype_timetable"]["selected_day_schedule"]
+        second_view = second["prototype_timetable"]["selected_day_schedule"]
+        self.assertEqual(first_view["returned_session_count"], 1)
+        self.assertTrue(first_view["pagination"]["has_more"])
+        self.assertEqual(first_view["pagination"]["next_display_offset"], 1)
+        self.assertEqual(second_view["returned_session_count"], 2)
+        self.assertFalse(second_view["pagination"]["has_more"])
+        self.assertEqual(len(self.report_tool.calls), report_call_count)
+        self.assertTrue(second["orchestration"]["cache_hit"])
+
+        period = self.invoke(
+            display_academic_week=1,
+            display_day="Monday",
+            display_period_id="P1",
+            display_limit=100,
+        )
+        period_view = period["prototype_timetable"]["selected_day_schedule"]
+        self.assertEqual(period_view["selected_period_id"], "P1")
+        self.assertEqual(period_view["filtered_session_count"], 2)
+        self.assertEqual(
+            {item["schedule_status"] for item in period_view["sessions"]},
+            {"compensation"},
+        )
+        self.assertEqual(len(self.report_tool.calls), report_call_count)
+
+    def test_rejects_day_view_outside_compensation_window(self) -> None:
+        result = self.invoke(display_academic_week=1, display_day="Sunday")
+
+        self.assertEqual(result["status"], "invalid_request")
+        self.assertEqual(self.report_tool.calls, [])
+
+    def test_rejects_unknown_display_period(self) -> None:
+        result = self.invoke(
+            display_academic_week=1,
+            display_day="Monday",
+            display_period_id="P99",
+        )
+
+        self.assertEqual(result["status"], "invalid_request")
+        self.assertIn("display_period_id", result["summary"])
+
+    def test_week_twelve_thursday_has_no_later_teaching_day(self) -> None:
+        result = self.invoke(day="Thursday", academic_week=12)
 
         self.assertEqual(result["status"], "invalid_request")
         self.assertIn("finals blackout", result["summary"])
+
+    def test_reports_progress_without_changing_the_result(self) -> None:
+        events: list[tuple[str, int | None, int | None]] = []
+        cancel_module.set_cancel_day_progress_reporter(
+            lambda phase, completed, total: events.append(
+                (phase, completed, total)
+            )
+        )
+        try:
+            result = self.invoke(result_limit=2)
+        finally:
+            cancel_module.set_cancel_day_progress_reporter(None)
+
+        self.assertEqual(result["status"], "success")
+        self.assertIn(
+            ("Checking rooms and candidate slots", 2, 2),
+            events,
+        )
+        self.assertEqual(events[-1], ("Prototype ready", 1, 1))
 
 
 if __name__ == "__main__":

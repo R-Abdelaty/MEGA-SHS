@@ -46,11 +46,16 @@ def parse_arguments() -> argparse.Namespace:
         default=20,
         help="Number of prototype sessions printed.",
     )
+    parser.add_argument("--display-week", type=int, default=None)
+    parser.add_argument("--display-day", default=None)
+    parser.add_argument("--display-period", default=None)
+    parser.add_argument("--display-offset", type=int, default=0)
+    parser.add_argument("--display-limit", type=int, default=100)
     parser.add_argument(
         "--general-file", default="05_General_Schedule.xlsx"
     )
     parser.add_argument(
-        "--staff-file", default="Doctor Schedule Calendar.xlsx"
+        "--staff-file", default="07_Doctor_Schedule_Calendar.xlsx"
     )
     parser.add_argument("--room-file", default="01_Room_Schedule.xlsx")
     parser.add_argument("--exam-file", default="06_Exam_Schedule.xlsx")
@@ -79,6 +84,11 @@ def main() -> int:
                 "maximum_following_weeks": arguments.following_weeks,
                 "result_offset": arguments.offset,
                 "result_limit": arguments.page_size,
+                "display_academic_week": arguments.display_week,
+                "display_day": arguments.display_day,
+                "display_period_id": arguments.display_period,
+                "display_offset": arguments.display_offset,
+                "display_limit": arguments.display_limit,
             }
         )
     )

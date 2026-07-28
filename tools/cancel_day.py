@@ -8,7 +8,7 @@ import json
 import re
 from collections import Counter, defaultdict
 from datetime import date, datetime
-from typing import Any
+from typing import Any, Callable
 
 from langchain.tools import tool
 
@@ -28,6 +28,30 @@ MAX_RESULT_LIMIT = 100
 TEACHING_WEEK_MAX = 12
 MAX_PROTOTYPE_CACHE_ENTRIES = 4
 _PROTOTYPE_CACHE: dict[str, dict[str, Any]] = {}
+_PROGRESS_REPORTER: Callable[[str, int | None, int | None], None] | None = None
+
+
+def set_cancel_day_progress_reporter(
+    reporter: Callable[[str, int | None, int | None], None] | None,
+) -> None:
+    """Register an optional console/UI progress reporter for the orchestrator."""
+    global _PROGRESS_REPORTER
+    _PROGRESS_REPORTER = reporter
+
+
+def _report_progress(
+    phase: str,
+    completed: int | None = None,
+    total: int | None = None,
+) -> None:
+    reporter = _PROGRESS_REPORTER
+    if reporter is None:
+        return
+    try:
+        reporter(phase, completed, total)
+    except Exception:
+        # Progress display must never affect scheduling results.
+        return
 
 DAY_ORDER = {
     "sunday": 0,
@@ -39,6 +63,37 @@ DAY_ORDER = {
     "saturday": 6,
 }
 DAY_NAMES = {name: name.title() for name in DAY_ORDER}
+TEACHING_DAYS = [
+    DAY_NAMES[key]
+    for key in sorted(DAY_ORDER, key=DAY_ORDER.get)
+    if DAY_ORDER[key] <= DAY_ORDER["thursday"]
+]
+SCHEDULE_STATUS_STYLES: dict[str, dict[str, str]] = {
+    "normal": {
+        "label": "Normal session",
+        "color_name": "gray",
+        "foreground": "#475569",
+        "background": "#F1F5F9",
+        "border": "#94A3B8",
+        "symbol": "=",
+    },
+    "compensation": {
+        "label": "New compensation",
+        "color_name": "green",
+        "foreground": "#166534",
+        "background": "#DCFCE7",
+        "border": "#22C55E",
+        "symbol": "+",
+    },
+    "cancelled": {
+        "label": "Cancelled session",
+        "color_name": "red",
+        "foreground": "#991B1B",
+        "background": "#FEE2E2",
+        "border": "#EF4444",
+        "symbol": "-",
+    },
+}
 DAY_ALIASES = {
     "sun": "Sunday",
     "sunday": "Sunday",
@@ -145,8 +200,12 @@ def _record_map(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _value(record: dict[str, Any], field: str) -> Any:
-    mapped = _record_map(record)
+def _value(
+    record: dict[str, Any],
+    field: str,
+    mapped: dict[str, Any] | None = None,
+) -> Any:
+    mapped = mapped if mapped is not None else _record_map(record)
     for alias in ALIASES[field]:
         if mapped.get(alias) not in (None, ""):
             return mapped[alias]
@@ -230,6 +289,59 @@ def _week(value: Any) -> int | None:
         return value
     match = re.search(r"\d+", str(value or ""))
     return int(match.group()) if match else None
+
+
+def _applies_to_week(value: Any, academic_week: int) -> bool:
+    """Return whether a general-schedule row applies to one academic week."""
+    if value in (None, ""):
+        return True
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value == academic_week
+    text = str(value).strip()
+    for start_text, end_text in re.findall(r"(\d+)\s*[-–—]\s*(\d+)", text):
+        start, end = int(start_text), int(end_text)
+        if min(start, end) <= academic_week <= max(start, end):
+            return True
+    return academic_week in {int(item) for item in re.findall(r"\d+", text)}
+
+
+def _display_schedule_row(
+    record: dict[str, Any], academic_week: int
+) -> dict[str, Any] | None:
+    """Normalize an unchanged timetable row for the UI's combined day view."""
+    mapped = _record_map(record)
+    value = lambda field: _value(record, field, mapped)
+    if _identity(value("status")) in INACTIVE_STATUSES:
+        return None
+    if not _applies_to_week(value("week"), academic_week):
+        return None
+    try:
+        day = _parse_day(value("day"))
+        start, _ = _parse_time(value("start"), "schedule.start")
+        end, _ = _parse_time(value("end"), "schedule.end")
+    except CancellationInputError:
+        return None
+    return {
+        "session_id": value("session_key"),
+        "course_id": value("course_id"),
+        "course_name": value("course_name"),
+        "session_type": value("session_type"),
+        "academic_week": academic_week,
+        "day": day,
+        "period": value("period"),
+        "period_id": value("period_id") or value("period"),
+        "start": start,
+        "end": end,
+        "room": value("room"),
+        "room_type": value("room_type"),
+        "room_capacity": _number(value("room_capacity")),
+        "expected_students": _number(value("expected_students")),
+        "student_groups": _split(value("student_groups")),
+        "staff": _split(value("instructor")),
+        "schedule_status": "normal",
+        "is_compensation": False,
+        "display": copy.deepcopy(SCHEDULE_STATUS_STYLES["normal"]),
+    }
 
 
 def _decode(raw: Any, tool_name: str) -> dict[str, Any]:
@@ -601,14 +713,138 @@ def _request_cache_key(request: dict[str, Any]) -> str:
     stable = {
         key: value
         for key, value in request.items()
-        if key not in {"result_offset", "result_limit"}
+        if key
+        not in {
+            "result_offset",
+            "result_limit",
+            "display_academic_week",
+            "display_day",
+            "display_period_id",
+            "display_offset",
+            "display_limit",
+        }
     }
     encoded = json.dumps(stable, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(encoded.encode()).hexdigest()
 
 
+def _day_key(academic_week: int, day: str) -> str:
+    return f"{academic_week}:{day.casefold()}"
+
+
+def _add_selected_day_schedule(
+    response: dict[str, Any],
+    cached: dict[str, Any],
+    display_academic_week: int | None,
+    display_day: str | None,
+    display_period_id: str | None,
+    display_offset: int,
+    display_limit: int,
+) -> dict[str, Any]:
+    selected = (
+        (display_academic_week, display_day)
+        if display_academic_week is not None and display_day is not None
+        else cached["default_display"]
+    )
+    selected_week, selected_day = selected
+    all_day_rows = cached["daily_rows"].get(_day_key(selected_week, selected_day), [])
+    slot_groups: list[dict[str, Any]] = []
+    valid_period_ids: set[str] = set()
+    for period in cached["period_definitions"]:
+        period_id = str(period.get("period_id") or period.get("period") or "").strip()
+        if not period_id:
+            continue
+        valid_period_ids.add(period_id.casefold())
+        slot_rows = [
+            item
+            for item in all_day_rows
+            if _identity(item.get("period_id") or item.get("period"))
+            == _identity(period_id)
+        ]
+        normal_count = sum(item["schedule_status"] == "normal" for item in slot_rows)
+        compensation_count = sum(
+            item["schedule_status"] == "compensation" for item in slot_rows
+        )
+        display_status = "compensation" if compensation_count else "normal"
+        slot_groups.append(
+            {
+                "period_id": period_id,
+                "period": period.get("period"),
+                "start": period.get("start"),
+                "end": period.get("end"),
+                "normal_session_count": normal_count,
+                "compensation_session_count": compensation_count,
+                "total_session_count": len(slot_rows),
+                "has_compensation": bool(compensation_count),
+                "display": copy.deepcopy(SCHEDULE_STATUS_STYLES[display_status]),
+            }
+        )
+    selected_period_id = (
+        str(display_period_id).strip() if display_period_id not in (None, "") else None
+    )
+    if selected_period_id is not None and selected_period_id.casefold() not in valid_period_ids:
+        return {
+            "status": "invalid_request",
+            "prototype_complete": response.get("prototype_complete", False),
+            "summary": "display_period_id is not a valid timetable period.",
+            "prototype_timetable": None,
+            "source_files_modified": False,
+        }
+    rows = (
+        [
+            item
+            for item in all_day_rows
+            if _identity(item.get("period_id") or item.get("period"))
+            == _identity(selected_period_id)
+        ]
+        if selected_period_id is not None
+        else all_day_rows
+    )
+    if display_offset > len(rows):
+        return {
+            "status": "invalid_request",
+            "prototype_complete": response.get("prototype_complete", False),
+            "summary": "display_offset is beyond the selected daily timetable.",
+            "prototype_timetable": None,
+            "source_files_modified": False,
+        }
+    page_end = min(display_offset + display_limit, len(rows))
+    page_rows = rows[display_offset:page_end]
+    response["prototype_timetable"]["selected_day_schedule"] = {
+        "academic_week": selected_week,
+        "day": selected_day,
+        "selected_period_id": selected_period_id,
+        "normal_session_count": sum(
+            item["schedule_status"] == "normal" for item in all_day_rows
+        ),
+        "compensation_session_count": sum(
+            item["schedule_status"] == "compensation" for item in all_day_rows
+        ),
+        "total_session_count": len(all_day_rows),
+        "filtered_session_count": len(rows),
+        "slot_groups": slot_groups,
+        "returned_session_count": len(page_rows),
+        "sessions": page_rows,
+        "pagination": {
+            "display_offset": display_offset,
+            "display_limit": display_limit,
+            "has_more": page_end < len(rows),
+            "next_display_offset": page_end if page_end < len(rows) else None,
+            "page_is_final": page_end >= len(rows),
+        },
+    }
+    return response
+
+
 def _cached_page(
-    cached: dict[str, Any], result_offset: int, result_limit: int
+    cached: dict[str, Any],
+    result_offset: int,
+    result_limit: int,
+    display_academic_week: int | None,
+    display_day: str | None,
+    display_period_id: str | None,
+    display_offset: int,
+    display_limit: int,
 ) -> dict[str, Any]:
     response = copy.deepcopy(cached["response"])
     rows = cached["rows"]
@@ -633,7 +869,15 @@ def _cached_page(
         "page_is_final": page_end >= len(rows),
     }
     response["orchestration"]["cache_hit"] = True
-    return response
+    return _add_selected_day_schedule(
+        response,
+        cached,
+        display_academic_week,
+        display_day,
+        display_period_id,
+        display_offset,
+        display_limit,
+    )
 
 
 @tool
@@ -643,13 +887,18 @@ def cancel_day(
     reason: str,
     cancellation_approved: bool,
     general_schedule_file: str = "05_General_Schedule.xlsx",
-    staff_schedule_file: str = "Doctor Schedule Calendar.xlsx",
+    staff_schedule_file: str = "07_Doctor_Schedule_Calendar.xlsx",
     room_schedule_file: str = "01_Room_Schedule.xlsx",
     exam_schedule_file: str = "06_Exam_Schedule.xlsx",
     sheet_name: str = "Semester Timetable",
     maximum_following_weeks: int = 2,
     result_offset: int = 0,
     result_limit: int = 50,
+    display_academic_week: int | None = None,
+    display_day: str | None = None,
+    display_period_id: str | None = None,
+    display_offset: int = 0,
+    display_limit: int = 100,
 ) -> str:
     """Create one read-only compensation timetable for a cancelled day.
 
@@ -660,13 +909,23 @@ def cancel_day(
     session, and delegates the final in-memory transformation to
     ``run_schedule_repair``.
 
-    Compensation is limited to the next one or two teaching weeks. Earlier weeks
-    and earlier university days are preferred, while existing participant campus
-    days are favored over creating a new day. The result is a prototype only: no
+    Compensation can begin on the next teaching day after the cancellation. The
+    remaining teaching days of the cancelled week are considered first, followed
+    by at most the next one or two teaching weeks. Earlier eligible slots are
+    preferred, while existing participant campus days are favored over creating a
+    new day. The result is a prototype only: no
     uploaded workbook is edited, no cancellation is applied, and no repair is
     approved. Detailed timetable rows are paginated with ``result_offset`` and
-    ``result_limit``.
+    ``result_limit``. ``display_academic_week`` and ``display_day`` select a
+    combined, paginated UI day view containing both normal and compensation
+    sessions, each explicitly labelled and grouped by period. Optionally use
+    ``display_period_id`` to page through one selected slot. A weekday plus
+    ``academic_week`` is a complete time scope;
+    the caller must not request a semester, academic year, or exact calendar date
+    when those values are supplied. The only user facts this operation requires
+    are day, academic week, reason, and confirmation of the cancellation scope.
     """
+    _report_progress("Validating cancellation request")
     request = {
         "day": day,
         "academic_week": academic_week,
@@ -680,6 +939,11 @@ def cancel_day(
         "maximum_following_weeks": maximum_following_weeks,
         "result_offset": result_offset,
         "result_limit": result_limit,
+        "display_academic_week": display_academic_week,
+        "display_day": display_day,
+        "display_period_id": display_period_id,
+        "display_offset": display_offset,
+        "display_limit": display_limit,
     }
     try:
         resolved_day = _parse_day(day)
@@ -710,15 +974,49 @@ def cancel_day(
             raise CancellationInputError(
                 f"result_limit must be between 1 and {MAX_RESULT_LIMIT}."
             )
-        target_weeks = [
+        if isinstance(display_offset, bool) or not isinstance(display_offset, int) or display_offset < 0:
+            raise CancellationInputError("display_offset must be a non-negative integer.")
+        if isinstance(display_limit, bool) or not isinstance(display_limit, int) or not 1 <= display_limit <= MAX_RESULT_LIMIT:
+            raise CancellationInputError(
+                f"display_limit must be between 1 and {MAX_RESULT_LIMIT}."
+            )
+        following_weeks = [
             week
             for week in range(academic_week + 1, academic_week + maximum_following_weeks + 1)
             if week <= TEACHING_WEEK_MAX
         ]
-        if not target_weeks:
+        remaining_current_week_days = [
+            candidate_day
+            for candidate_day in TEACHING_DAYS
+            if DAY_ORDER[candidate_day.casefold()] > DAY_ORDER[resolved_day.casefold()]
+        ]
+        candidate_week_days = []
+        if remaining_current_week_days:
+            candidate_week_days.append((academic_week, remaining_current_week_days))
+        candidate_week_days.extend((week, TEACHING_DAYS) for week in following_weeks)
+        target_weeks = [week for week, _days in candidate_week_days]
+        if not candidate_week_days:
             raise CancellationInputError(
-                "No following teaching week is available before the finals blackout."
+                "No later teaching day is available before the finals blackout."
             )
+        resolved_display_day: str | None = None
+        if (display_academic_week is None) != (display_day is None):
+            raise CancellationInputError(
+                "display_academic_week and display_day must be supplied together."
+            )
+        if display_academic_week is not None and display_day is not None:
+            if isinstance(display_academic_week, bool) or not isinstance(display_academic_week, int):
+                raise CancellationInputError("display_academic_week must be an integer.")
+            resolved_display_day = _parse_day(display_day)
+            eligible_pairs = {
+                (week, candidate_day)
+                for week, candidate_days in candidate_week_days
+                for candidate_day in candidate_days
+            }
+            if (display_academic_week, resolved_display_day) not in eligible_pairs:
+                raise CancellationInputError(
+                    "The selected display day is outside the permitted compensation window."
+                )
     except CancellationInputError as exc:
         return _json(
             {
@@ -733,11 +1031,22 @@ def cancel_day(
 
     cache_key = _request_cache_key(request)
     if cache_key in _PROTOTYPE_CACHE:
+        _report_progress("Loading cached prototype", 1, 1)
         return _json(
-            _cached_page(_PROTOTYPE_CACHE[cache_key], result_offset, result_limit)
+            _cached_page(
+                _PROTOTYPE_CACHE[cache_key],
+                result_offset,
+                result_limit,
+                display_academic_week,
+                resolved_display_day,
+                display_period_id,
+                display_offset,
+                display_limit,
+            )
         )
 
     try:
+        _report_progress("Retrieving affected sessions")
         report_payload = _invoke(
             report_disruption,
             {
@@ -756,6 +1065,7 @@ def cancel_day(
         affected, affected_retrieval = _collect_affected(
             general_schedule_file.strip(), resolved_day, academic_week, sheet_name.strip()
         )
+        _report_progress("Retrieving schedules and priority", 0, len(affected))
         priority_payload = _invoke(
             check_priority,
             {
@@ -840,15 +1150,14 @@ def cancel_day(
     assignments: list[dict[str, Any]] = []
     unassigned: list[dict[str, Any]] = []
     rejection_totals: Counter[str] = Counter()
-    ordered_days = [DAY_NAMES[key] for key in sorted(DAY_ORDER, key=DAY_ORDER.get) if DAY_ORDER[key] <= 4]
-
+    _report_progress("Checking rooms and candidate slots", 0, len(normalized_order))
     for order, normalized_key in enumerate(normalized_order, start=1):
         session = normalized_by_key[normalized_key]
         session_groups = {_identity(value) for value in session["student_groups"]}
         session_staff = {_identity(value) for value in session["staff"]}
         candidates: list[tuple[float, int, str, dict[str, Any]]] = []
-        for target_week in target_weeks:
-            for target_day in ordered_days:
+        for target_week, eligible_days in candidate_week_days:
+            for target_day in eligible_days:
                 new_day_count = sum(
                     target_day not in group_days.get(group, set()) for group in session_groups
                 ) + sum(
@@ -881,7 +1190,7 @@ def cancel_day(
                         rejection_totals["assessment_conflict"] += 1
                         continue
                     score = (
-                        (target_week - academic_week - 1) * 10_000
+                        (target_week - academic_week) * 10_000
                         + DAY_ORDER[target_day.casefold()] * 100
                         + new_day_count * 250
                         + daily_load * 20
@@ -968,10 +1277,15 @@ def cancel_day(
                     "session_key": session["session_key"],
                     "repair_order": order,
                     "session_type": session["session_type"],
-                    "reason": "No conflict-screened staff-and-room placement was found in the permitted following weeks.",
+                    "reason": "No conflict-screened staff-and-room placement was found in the permitted compensation window.",
                     "rejection_counts": dict(sorted(local_rejections.items())),
                 }
             )
+        _report_progress(
+            "Checking rooms and candidate slots",
+            order,
+            len(normalized_order),
+        )
 
     assignments_by_slot: dict[tuple[int, str, str, str], list[dict[str, Any]]] = defaultdict(list)
     for assignment in assignments:
@@ -984,7 +1298,12 @@ def cancel_day(
             )
         ].append(assignment)
     rejected_assignment_keys: set[str] = set()
-    for slot_key, slot_assignments in assignments_by_slot.items():
+    assignment_slots = list(assignments_by_slot.items())
+    _report_progress("Confirming staff availability", 0, len(assignment_slots))
+    for slot_number, (slot_key, slot_assignments) in enumerate(
+        assignment_slots,
+        start=1,
+    ):
         target_week, target_day, start, end = slot_key
         staff_ids = sorted(
             {
@@ -1028,6 +1347,11 @@ def cancel_day(
                         }
                     )
                     rejection_totals["staff_availability_unconfirmed"] += 1
+        _report_progress(
+            "Confirming staff availability",
+            slot_number,
+            len(assignment_slots),
+        )
     if rejected_assignment_keys:
         assignments = [
             assignment
@@ -1040,6 +1364,7 @@ def cancel_day(
         raw_by_key[key] for key in normalized_order if key in assigned_keys
     ]
     if assignments:
+        _report_progress("Building the prototype timetable", 0, 1)
         repair_payload = _invoke(
             run_schedule_repair,
             {
@@ -1065,6 +1390,7 @@ def cancel_day(
                     "source_files_modified": False,
                 }
             )
+        _report_progress("Building the prototype timetable", 1, 1)
 
     timetable_rows: list[dict[str, Any]] = []
     for assignment in assignments:
@@ -1089,6 +1415,9 @@ def cancel_day(
                 "staff": session["staff"],
                 "repair_order": assignment["repair_order"],
                 "change_reason": f"Compensation for cancelled {resolved_day}, academic week {academic_week}",
+                "schedule_status": "compensation",
+                "is_compensation": True,
+                "display": copy.deepcopy(SCHEDULE_STATUS_STYLES["compensation"]),
             }
         )
     timetable_rows.sort(
@@ -1107,6 +1436,68 @@ def cancel_day(
             "sessions_by_day": dict(sorted(Counter(item["day"] for item in rows).items(), key=lambda pair: DAY_ORDER[pair[0].casefold()])),
             "sessions_by_type": dict(sorted(Counter(item["session_type"] for item in rows).items())),
         }
+
+    daily_rows: dict[str, list[dict[str, Any]]] = {}
+    day_views: list[dict[str, Any]] = []
+    eligible_pairs = [
+        (week, candidate_day)
+        for week, candidate_days in candidate_week_days
+        for candidate_day in candidate_days
+    ]
+    eligible_days_by_week = {
+        week: set(candidate_days) for week, candidate_days in candidate_week_days
+    }
+    normal_rows_by_day: dict[tuple[int, str], list[dict[str, Any]]] = defaultdict(list)
+    for target_week in target_weeks:
+        for general_row in general_rows:
+            display_row = _display_schedule_row(general_row, target_week)
+            if (
+                display_row is not None
+                and display_row["day"] in eligible_days_by_week[target_week]
+            ):
+                normal_rows_by_day[(target_week, display_row["day"])].append(
+                    display_row
+                )
+    for target_week, target_day in eligible_pairs:
+        normal_rows = normal_rows_by_day[(target_week, target_day)]
+        compensation_rows = [
+            copy.deepcopy(item)
+            for item in timetable_rows
+            if item["academic_week"] == target_week and item["day"] == target_day
+        ]
+        combined_rows = [*normal_rows, *compensation_rows]
+        combined_rows.sort(
+            key=lambda item: (
+                item.get("start") or "",
+                0 if item["schedule_status"] == "normal" else 1,
+                _identity(item.get("room")),
+                _identity(item.get("session_id")),
+            )
+        )
+        daily_rows[_day_key(target_week, target_day)] = combined_rows
+        day_views.append(
+            {
+                "academic_week": target_week,
+                "day": target_day,
+                "normal_session_count": len(normal_rows),
+                "compensation_session_count": len(compensation_rows),
+                "total_session_count": len(combined_rows),
+                "has_compensation": bool(compensation_rows),
+                "display": copy.deepcopy(
+                    SCHEDULE_STATUS_STYLES[
+                        "compensation" if compensation_rows else "normal"
+                    ]
+                ),
+            }
+        )
+    default_display = next(
+        (
+            (item["academic_week"], item["day"])
+            for item in day_views
+            if item["has_compensation"]
+        ),
+        eligible_pairs[0],
+    )
 
     if result_offset > len(timetable_rows):
         return _json(
@@ -1140,11 +1531,16 @@ def cancel_day(
                 "academic_week": academic_week,
                 "reason": str(reason).strip(),
                 "affected_session_count": len(affected),
+                "display": copy.deepcopy(SCHEDULE_STATUS_STYLES["cancelled"]),
             },
             "prototype_timetable": {
                 "status": "pending_user_confirmation",
+                "color_legend": copy.deepcopy(SCHEDULE_STATUS_STYLES),
                 "target_academic_weeks": target_weeks,
+                "compensation_starts_after_cancelled_day": True,
                 "week_summary": week_summary,
+                "day_views": day_views,
+                "selected_day_schedule": None,
                 "total_compensation_sessions": len(timetable_rows),
                 "returned_compensation_sessions": len(page_rows),
                 "sessions": page_rows,
@@ -1161,8 +1557,9 @@ def cancel_day(
             "constraint_summary": {
                 "priority_order_applied": "Exam/Quiz > Lecture > Laboratory > Tutorial",
                 "following_week_limit": maximum_following_weeks,
-                "earlier_weeks_preferred": True,
-                "earlier_weekdays_preferred": True,
+                "remaining_cancelled_week_days_considered_first": True,
+                "same_or_earlier_cancelled_week_days_allowed": False,
+                "earlier_eligible_slots_preferred": True,
                 "existing_participant_days_preferred": True,
                 "base_student_conflicts_allowed": False,
                 "base_staff_conflicts_allowed": False,
@@ -1207,8 +1604,22 @@ def cancel_day(
         }
     if len(_PROTOTYPE_CACHE) >= MAX_PROTOTYPE_CACHE_ENTRIES:
         _PROTOTYPE_CACHE.pop(next(iter(_PROTOTYPE_CACHE)))
-    _PROTOTYPE_CACHE[cache_key] = {
+    cache_record = {
         "response": copy.deepcopy(response),
         "rows": copy.deepcopy(timetable_rows),
+        "daily_rows": daily_rows,
+        "default_display": default_display,
+        "period_definitions": copy.deepcopy(periods),
     }
+    _PROTOTYPE_CACHE[cache_key] = cache_record
+    response = _add_selected_day_schedule(
+        response,
+        cache_record,
+        display_academic_week,
+        resolved_display_day,
+        display_period_id,
+        display_offset,
+        display_limit,
+    )
+    _report_progress("Prototype ready", 1, 1)
     return _json(response)

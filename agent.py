@@ -1,6 +1,10 @@
 """Self-Healing University Scheduler agent."""
 
+import asyncio
 import os
+import sys
+import threading
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -8,6 +12,14 @@ from langchain.agents import create_agent
 from langchain.chat_models import init_chat_model
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import InMemorySaver
+
+from console_presenter import format_console_result
+from intake_middleware import (
+    answer_intake,
+    format_console_question,
+    parse_console_answer,
+    start_intake,
+)
 
 from tools import (
     approve_repair,
@@ -23,9 +35,94 @@ from tools import (
     retrieve_university_policies,
     run_schedule_repair,
 )
+from tools.cancel_day import set_cancel_day_progress_reporter
 
 
 ENV_FILE = Path(__file__).with_name(".env")
+
+
+def _format_duration(seconds: float) -> str:
+    total_seconds = max(0, round(seconds))
+    minutes, second = divmod(total_seconds, 60)
+    hours, minute = divmod(minutes, 60)
+    return (
+        f"{hours:02d}:{minute:02d}:{second:02d}"
+        if hours
+        else f"{minute:02d}:{second:02d}"
+    )
+
+
+class ConsoleProgressTimer:
+    """Display elapsed time and a progress-based ETA for the console UI."""
+
+    def __init__(self) -> None:
+        self._started = time.perf_counter()
+        self._phase_started = self._started
+        self._phase = "Agent processing"
+        self._completed: int | None = None
+        self._total: int | None = None
+        self._stop_event = threading.Event()
+        self._lock = threading.Lock()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._last_width = 0
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def update(
+        self,
+        phase: str,
+        completed: int | None = None,
+        total: int | None = None,
+    ) -> None:
+        with self._lock:
+            if phase != self._phase:
+                self._phase_started = time.perf_counter()
+            self._phase = phase
+            self._completed = completed
+            self._total = total
+
+    def _line(self) -> str:
+        now = time.perf_counter()
+        with self._lock:
+            phase = self._phase
+            completed = self._completed
+            total = self._total
+            phase_started = self._phase_started
+        elapsed = now - self._started
+        progress = ""
+        remaining = "estimating..."
+        if total is not None and completed is not None and total > 0:
+            completed = min(max(completed, 0), total)
+            progress = f" | progress {completed}/{total}"
+            if completed > 0:
+                phase_elapsed = max(0, now - phase_started)
+                eta = (phase_elapsed / completed) * (total - completed)
+                remaining = f"~{_format_duration(eta)}"
+        return (
+            f"[Working] {phase}{progress} | elapsed {_format_duration(elapsed)} "
+            f"| remaining {remaining}"
+        )
+
+    def _render(self) -> None:
+        line = self._line()
+        padding = max(0, self._last_width - len(line))
+        sys.stdout.write("\r" + line + (" " * padding))
+        sys.stdout.flush()
+        self._last_width = len(line)
+
+    def _run(self) -> None:
+        self._render()
+        while not self._stop_event.wait(1):
+            self._render()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        self._thread.join(timeout=2)
+        elapsed = time.perf_counter() - self._started
+        clear_width = max(self._last_width, 1)
+        sys.stdout.write("\r" + (" " * clear_width) + "\r")
+        print(f"[Finished] Agent completed in {_format_duration(elapsed)}")
 
 
 def _load_anthropic_credentials() -> None:
@@ -64,9 +161,15 @@ validate, and repair university schedules as a backend decision engine.
 CORE BEHAVIOR
 - Maximize accuracy. Never guess or invent schedule data, university policy, or
   tool results.
-- If required information is missing, unclear, contradictory, inaccessible, or
-  uncertain, stop and request confirmation through the website's request
-  section.
+- Treat values selected in the website UI as confirmed, authoritative inputs.
+- Ask a clarification question only when a mandatory tool input is missing or
+  contradictory and cannot be derived directly from the supplied UI values.
+- Ask only for the missing mandatory value. Do not request background details,
+  explanations, dates, calendar labels, approvals, or policy choices that the
+  selected operation does not require.
+- Keep every request precise and concise. Do not present menus, speculative
+  options, generic workflows, or "once confirmed" task lists unless the UI
+  explicitly requests them.
 - Retrieve every authoritative schedule source relevant to the current
   decision. Sources may include the General, Room, Doctors, and Exam schedules,
   plus enrollment, equipment, and other supporting schedules when relevant.
@@ -109,16 +212,45 @@ HOW TO USE CANCEL_DAY
   orchestrator instead of manually coordinating hundreds of individual tool
   calls. Supply the exact academic week, reason, and authoritative general,
   staff, room, and exam schedule file names.
+- A weekday plus an academic week is a complete time scope. Do not ask for a
+  semester, academic year, or calendar date when those two values are present.
+- The mandatory user inputs are the cancelled day, academic week, reason, and
+  confirmation that the cancellation scope is approved. Schedule file names
+  have authoritative defaults and must not be requested from the user.
+- Treat an affirmative UI selection or direct confirmed cancellation command as
+  cancellation_approved=true. This authorizes only the read-only prototype; it
+  is not approval to apply a repaired timetable.
+- If one mandatory value is absent, request only that value in one short
+  sentence. Do not add examples, multiple-choice suggestions, or a workflow
+  explanation.
 - Set cancellation_approved=true only when the disruption itself is confirmed.
   This confirms the dry-run scope; it does not approve or apply the resulting
   compensation timetable.
-- Keep maximum_following_weeks at 2 or less. The tool returns one read-only
-  prototype, preferring the first following week and earlier university days.
+- Use cancel_day only for a complete teaching-day cancellation. For a campus-wide
+  partial-day or period cancellation, report partial_day_cancelled with the day,
+  academic week, and exact start/end time. For a single cancelled class, report
+  session_cancelled with its session ID instead.
+- Keep maximum_following_weeks at 2 or less. Compensation can start on the next
+  teaching day after the cancellation: use the remaining days of that academic
+  week first, then at most the next two teaching weeks. Never place compensation
+  on the cancelled day or an earlier day in the cancelled week.
 - Follow prototype_timetable.pagination until has_more is false before claiming
   to have reviewed the complete proposal. cancel_day never writes to a source
   schedule.
+- For a timetable UI, use prototype_timetable.day_views to render the available
+  week/day tabs. Request a tab with display_academic_week and display_day, then
+  render selected_day_schedule.sessions together. Distinguish rows using
+  schedule_status: normal or compensation, apply the returned color_legend, and
+  use slot_groups for the five period sections. Use display_period_id when the
+  UI opens one slot, and follow the selected day/slot pagination.
 - If prototype_complete is false, report the exact unassigned sessions and
   constraints after the orchestrator has attempted the complete confirmed scope.
+- Report rejection totals as candidate-slot rejection counts, not as counts of
+  sessions, rooms, staff members, or students.
+- Use the tool's required_action exactly. Do not invent additional options such
+  as extending beyond two weeks, reducing room capacity, substituting room
+  types, splitting sessions, cancelling fewer sessions, or relaxing any hard
+  constraint.
 
 HOW TO USE RUN_SCHEDULE_REPAIR
 - run_schedule_repair is a subordinate, side-effect-free transformation tool.
@@ -186,8 +318,10 @@ agent = create_agent(
 
 
 def main() -> None:
-    """Run an interactive conversation with the scheduler agent."""
+    """Run the same deterministic intake workflow used by the future UI."""
     print("Self-Healing University Scheduler is ready. Type 'exit' or 'quit' to leave.")
+    intake = start_intake()
+    print(f"\nScheduler:\n{format_console_question(intake['question'])}\n")
 
     while True:
         user_message = input("You: ").strip()
@@ -196,11 +330,36 @@ def main() -> None:
         if not user_message:
             continue
 
-        result = agent.invoke(
-            {"messages": [{"role": "user", "content": user_message}]},
-            config=thread_config,
-        )
-        print(f"\nScheduler: {result['messages'][-1].content}\n")
+        try:
+            answer = parse_console_answer(intake["question"], user_message)
+            intake = answer_intake(intake["intake_id"], answer)
+        except ValueError as exc:
+            print(f"\nScheduler: {exc}")
+            print(format_console_question(intake["question"]) + "\n")
+            continue
+
+        if intake["status"] == "collecting":
+            print(f"\nScheduler:\n{format_console_question(intake['question'])}\n")
+            continue
+        if intake["status"] == "cancelled":
+            print("\nScheduler: Request cancelled. No scheduling tool was run.\n")
+            intake = start_intake()
+            print(f"Scheduler:\n{format_console_question(intake['question'])}\n")
+            continue
+
+        timer = ConsoleProgressTimer()
+        set_cancel_day_progress_reporter(timer.update)
+        timer.start()
+        try:
+            from api import execute_ready_intake
+
+            result = asyncio.run(execute_ready_intake(intake))
+        finally:
+            set_cancel_day_progress_reporter(None)
+            timer.stop()
+        print("\nScheduler:\n" + format_console_result(result) + "\n")
+        intake = start_intake()
+        print(f"Scheduler:\n{format_console_question(intake['question'])}\n")
 
 
 if __name__ == "__main__":

@@ -41,6 +41,54 @@ class ReportDisruptionTests(unittest.TestCase):
         fields = {item["field"] for item in result["missing_information"]}
         self.assertIn("whole_day/start_time/end_time", fields)
 
+    def test_complete_partial_day_cancellation(self) -> None:
+        result = invoke(
+            disruption_type="partial day cancellation",
+            description="The campus is closed for the first two periods.",
+            affected_day_or_date="Tuesday",
+            academic_week=3,
+            start_time="08:30",
+            end_time="11:45",
+        )
+
+        self.assertEqual(result["status"], "success")
+        report = result["disruption_report"]
+        self.assertEqual(report["disruption_type"], "partial_day_cancelled")
+        self.assertFalse(report["scope"]["whole_day"])
+        self.assertEqual(report["scope"]["start_time"], "08:30")
+        self.assertEqual(report["scope"]["end_time"], "11:45")
+        self.assertEqual(result["next_action"]["tool"], "get_schedule")
+
+    def test_partial_day_cancellation_requires_time_scope(self) -> None:
+        result = invoke(
+            disruption_type="partial day cancellation",
+            description="Part of the teaching day is cancelled.",
+            affected_day_or_date="Tuesday",
+            academic_week=3,
+        )
+
+        self.assertEqual(result["status"], "information_required")
+        fields = {item["field"] for item in result["missing_information"]}
+        self.assertIn("whole_day/start_time/end_time", fields)
+
+    def test_full_and_partial_day_types_cannot_be_mixed(self) -> None:
+        full_without_flag = invoke(
+            disruption_type="day cancelled",
+            description="The whole teaching day is cancelled.",
+            affected_day_or_date="Tuesday",
+            academic_week=3,
+        )
+        partial_with_flag = invoke(
+            disruption_type="partial day cancellation",
+            description="The whole teaching day is cancelled.",
+            affected_day_or_date="Tuesday",
+            academic_week=3,
+            whole_day=True,
+        )
+
+        self.assertEqual(full_without_flag["status"], "invalid_request")
+        self.assertEqual(partial_with_flag["status"], "invalid_request")
+
     def test_exact_date_and_time_are_normalized(self) -> None:
         result = invoke(
             disruption_type="room closed",

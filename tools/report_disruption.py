@@ -1,7 +1,7 @@
 """Validate and normalize university scheduling disruption reports.
 
 This tool is the formal intake boundary for the repair workflow.  It does not
-alter a timetable or claim that reported facts have been verified against an
+alter a timetable or 1claim that reported facts have been verified against an
 uploaded schedule.  Instead, it produces a deterministic, structured report
 that downstream retrieval, repair, comparison, and validation tools can use.
 """
@@ -52,6 +52,22 @@ DISRUPTION_TYPES: dict[str, dict[str, Any]] = {
         "required": {"day", "week"},
         "default_urgency": "critical",
         "next_tool": "find_affected_sessions",
+    },
+    "partial_day_cancelled": {
+        "label": "University partial day or time block cancelled",
+        "aliases": {
+            "partial day cancelled",
+            "partial day canceled",
+            "partial day cancellation",
+            "time block cancelled",
+            "time block canceled",
+            "period cancelled",
+            "period canceled",
+            "campus closed for part of day",
+        },
+        "required": {"day", "week", "time_scope"},
+        "default_urgency": "critical",
+        "next_tool": "get_schedule",
     },
     "lecturer_or_ta_unavailable": {
         "label": "Lecturer or teaching assistant unavailable",
@@ -452,9 +468,10 @@ def report_disruption(
 ) -> str:
     """Create a validated disruption report before any schedule repair.
 
-    Use this tool for day cancellations, unavailable staff/rooms/equipment,
-    cancelled sessions, visiting-professor restrictions, added exams or quizzes,
-    room-capacity corrections, university events, and rejected repairs.  The
+    Use this tool for full-day or partial-day cancellations, unavailable
+    staff/rooms/equipment, cancelled sessions, visiting-professor restrictions,
+    added exams or quizzes, room-capacity corrections, university events, and
+    rejected repairs.  The
     result contains a stable disruption ID, normalized scope, missing-information
     requests, hard constraints, and the next workflow action.  It records the
     supplied report only; it does not verify schedule facts or change a schedule.
@@ -497,6 +514,17 @@ def report_disruption(
                         "Select one supported disruption_type through the website request section."
                     ),
                 }
+            )
+
+        if normalized_type == "day_cancelled" and whole_day is not True:
+            raise DisruptionInputError(
+                "day_cancelled requires whole_day=true; use partial_day_cancelled "
+                "or session_cancelled for a smaller scope."
+            )
+        if normalized_type == "partial_day_cancelled" and whole_day is True:
+            raise DisruptionInputError(
+                "partial_day_cancelled requires start_time and end_time; use "
+                "day_cancelled for a full teaching day."
             )
 
         day, exact_date, day_precision = _parse_day_or_date(affected_day_or_date)

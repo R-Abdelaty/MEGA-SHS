@@ -277,7 +277,11 @@ def _validate_assignment_against_report(
 ) -> None:
     disruption_type = str(report["disruption_type"]).strip().casefold()
     overlaps = _overlaps_disruption(report, assignment)
-    if disruption_type in {"day_cancelled", "lecturer_or_ta_unavailable"} and overlaps:
+    if disruption_type in {
+        "day_cancelled",
+        "partial_day_cancelled",
+        "lecturer_or_ta_unavailable",
+    } and overlaps:
         raise RepairInputError(
             f"Assignment for {assignment['session_key']} remains inside the disruption scope."
         )

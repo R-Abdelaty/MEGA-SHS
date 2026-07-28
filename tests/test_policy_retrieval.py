@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import unittest
+from pathlib import Path
 
 from knowledge_base.retriever import (
     PolicyKnowledgeError,
@@ -13,6 +14,24 @@ from knowledge_base.retriever import (
 
 
 class PolicyRetrievalTests(unittest.TestCase):
+    def test_agent_prompt_forbids_redundant_cancellation_questions(self) -> None:
+        agent_source = (Path(__file__).resolve().parent.parent / "agent.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            "A weekday plus an academic week is a complete time scope",
+            agent_source,
+        )
+        self.assertIn(
+            "Ask only for the missing mandatory value",
+            agent_source,
+        )
+        self.assertIn(
+            "Do not invent additional options",
+            agent_source,
+        )
+
     def test_explicit_categories_return_only_requested_documents(self) -> None:
         payload = retrieve_policies(
             categories=["exam_rules", "session_priorities"],
@@ -70,6 +89,17 @@ class PolicyRetrievalTests(unittest.TestCase):
         )
         self.assertIn("explicitly approved", approval_description)
         self.assertIn("validation_complete == true", approval_description)
+
+        cancel_module = importlib.import_module("tools.cancel_day")
+        cancel_description = " ".join(cancel_module.cancel_day.description.split())
+        self.assertIn(
+            "weekday plus ``academic_week`` is a complete time scope",
+            cancel_description,
+        )
+        self.assertIn(
+            "day, academic week, reason, and confirmation",
+            cancel_description,
+        )
 
     def test_validator_discovers_authoritative_files_without_paths(self) -> None:
         validity_module = importlib.import_module("tools.check_validity")
