@@ -11,11 +11,17 @@ from typing import Any
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Path, Query, Request, Security
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
+
+from mega_shs import SCHEMA_VERSION
+from mega_shs.errors import ApiContractError
+from mega_shs.routes import router as healing_router
+from mega_shs.routes import task_manager as healing_task_manager
 
 from api_contract import (
     ASSESSMENT_TYPES,
@@ -229,7 +235,15 @@ async def health() -> JSONResponse:
             "status": "ok",
             "api_version": "v1",
             "ui_api_key_configured": bool(os.getenv("SCHEDULER_UI_API_KEY", "").strip()),
-            "anthropic_api_key_configured": bool(os.getenv("ANTHROPIC_API_KEY", "").strip()),
+            "litellm_api_key_configured": bool(os.getenv("LITELLM_API_KEY", "").strip()),
+            "litellm_api_base": os.getenv(
+                "LITELLM_API_BASE",
+                "https://litellm.i-hq.tech/v1",
+            ).strip(),
+            "litellm_model": os.getenv(
+                "LITELLM_MODEL",
+                "anthropic/claude-haiku-4-5",
+            ).strip(),
         }
     )
 
@@ -445,8 +459,12 @@ origins = [
 
 app = FastAPI(
     title="Self-Healing University Scheduler API",
-    summary="Read-only disruption intake and timetable repair prototypes.",
-    version="1.0.0",
+    summary="Validated healing runs and timetable repair prototypes.",
+    description=(
+        "The primary `/api` routes provide the React UI's validated healing-run "
+        "workflow. Legacy `/api/v1` routes remain available for compatibility."
+    ),
+    version=SCHEMA_VERSION,
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_url="/openapi.json",
@@ -455,8 +473,22 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "X-API-Key"],
+    allow_headers=["Content-Type", "X-API-Key", "X-Workspace-ID"],
 )
+
+
+@app.exception_handler(ApiContractError)
+async def api_contract_error_handler(
+    _request: Request,
+    exc: ApiContractError,
+) -> JSONResponse:
+    return JSONResponse(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "error": exc.error.model_dump(mode="json"),
+        },
+        status_code=exc.status_code,
+    )
 
 
 @app.exception_handler(SchedulerAPIError)
@@ -469,9 +501,23 @@ async def scheduler_api_error_handler(
 
 @app.exception_handler(RequestValidationError)
 async def request_validation_error_handler(
-    _request: Request,
+    request: Request,
     exc: RequestValidationError,
 ) -> JSONResponse:
+    if request.url.path.startswith("/api/") and not request.url.path.startswith(
+        f"{API_PREFIX}/"
+    ):
+        return JSONResponse(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "error": {
+                    "code": "INVALID_CANCELLATION",
+                    "message": "The request body failed validation.",
+                    "details": jsonable_encoder(exc.errors()),
+                },
+            },
+            status_code=422,
+        )
     return _error(
         422,
         "invalid_request_body",
@@ -546,3 +592,10 @@ app.add_api_route(
     tags=["Agent"],
     dependencies=authenticated,
 )
+
+app.include_router(healing_router)
+
+
+@app.on_event("shutdown")
+async def shutdown_healing_tasks() -> None:
+    await healing_task_manager.shutdown()

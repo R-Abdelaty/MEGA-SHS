@@ -1,6 +1,7 @@
 # Scheduler tool tests
 
-Run the complete suite from the repository root:
+Run the complete suite from the repository root (including the validated
+healing-run contract tests):
 
 ```powershell
 python -m unittest discover -s tests -v
@@ -43,6 +44,20 @@ The suite covers every tool that currently has a real implementation:
 - `run_schedule_repair`
 - `compare_schedule_versions`
 - `check_validity`
+
+It also covers the FastAPI healing-run request models and routes, deterministic
+event IDs and schedule hashes, asynchronous lifecycle, structured-output
+failure handling, proposal validation, approval/rejection, stale protection,
+in-memory preview and change history, source-file immutability, and the export
+skeleton.
+
+The frontend currently has no test runner. Verify it with:
+
+```powershell
+Set-Location frontend
+npm run lint
+npm run build
+```
 
 It tests input validation, safe failure behavior, schedule filtering and
 pagination, disruption normalization, affected-session scope, strict repair

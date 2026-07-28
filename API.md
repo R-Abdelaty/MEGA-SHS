@@ -1,144 +1,290 @@
-# Scheduler UI FastAPI
+# MEGA-SHS API contract
 
-The backend is a FastAPI application with typed Pydantic request bodies,
-validated path/query parameters, and an OpenAPI API-key security definition.
+This is the canonical public contract for the React scheduling UI. All new
+responses use snake_case, `schema_version: "1.0"`, Pydantic response models,
+timezone-aware ISO 8601 timestamps, and the error envelope shown below.
 
-Run the API from the repository root:
+Interactive OpenAPI documentation is available at `/docs`, with ReDoc at
+`/redoc` and the raw schema at `/openapi.json`.
 
-```powershell
-python -m uvicorn api:app --host 127.0.0.1 --port 8000 --reload
+Every endpoint requires:
+
+```http
+X-API-Key: configured-ui-key
+X-Workspace-ID: stable-workspace-id
 ```
 
-Development documentation is available while the server is running:
-
-- Swagger UI: `http://127.0.0.1:8000/docs`
-- ReDoc: `http://127.0.0.1:8000/redoc`
-- OpenAPI JSON: `http://127.0.0.1:8000/openapi.json`
-
-The documentation pages and schema are public so development tools can load
-them. Every `/api/v1` operation remains protected by the documented
-`X-API-Key` security scheme.
-
-Copy `.env.example` to `.env` and set both backend keys. The browser sends only
-`SCHEDULER_UI_API_KEY` through the `X-API-Key` header. Never expose
-`ANTHROPIC_API_KEY` in frontend code, JavaScript bundles, local storage, or API
-responses.
+Data is isolated by workspace. In-memory data disappears when FastAPI
+restarts.
 
 ## Endpoints
 
-| Method | Path | Purpose |
+| Method | Path | Response model |
 |---|---|---|
-| GET | `/health` | Backend and key-configuration status |
-| GET | `/api/v1/options` | Static numbered dropdown definitions |
-| POST | `/api/v1/intake/start` | Start the UI wizard; returns only the Day question |
-| GET | `/api/v1/intake/{id}` | Read the current wizard question and answers |
-| POST | `/api/v1/intake/{id}/answer` | Submit one numeric answer and receive the next question |
-| GET | `/api/v1/catalogs/{name}` | Numbered dynamic resource options |
-| POST | `/api/v1/disruptions/report` | Normalize any supported disruption form |
-| POST | `/api/v1/prototypes/cancel-day` | Generate a read-only full-day prototype |
-| GET | `/api/v1/prototypes/{id}/weeks/{week}/days/{day}` | Read a cached day or period view |
-| POST | `/api/v1/agent/messages` | Send a message to the scheduler agent |
+| POST | `/api/healing-runs` | `CreateHealingRunResponse` |
+| GET | `/api/healing-runs/{run_id}` | `HealingRunResponse` |
+| POST | `/api/healing-runs/{run_id}/approve` | `ApproveHealingRunResponse` |
+| POST | `/api/healing-runs/{run_id}/reject` | `RejectHealingRunResponse` |
+| GET | `/api/change-history` | `ChangeHistoryResponse` |
+| GET | `/api/schedule` | `ScheduleResponse` |
+| POST | `/api/schedule/export` | `ExportScheduleResponse` (`501`) |
 
-Valid catalog names are `staff`, `rooms`, `equipment`, `sessions`, and
-`student-groups`. Catalogs accept `query`, `offset`, and `limit`. The sessions
-catalog also accepts `day_option=1..5`.
+The previous `/api/v1/options`, intake, catalogs, disruptions, prototypes, and
+agent-message routes remain mounted for compatibility. New React code does not
+consume the legacy natural-language agent-message route.
 
-Every `/api/v1` request requires:
+## Create a healing run
 
-```http
-X-API-Key: value-of-SCHEDULER_UI_API_KEY
-Content-Type: application/json
-```
-
-## Required UI wizard flow
-
-The UI should start every request with:
-
-```http
-POST /api/v1/intake/start
-```
-
-There is no request body. The response contains one question only:
+Cancel specific events:
 
 ```json
 {
-  "status": "collecting",
-  "intake_id": "INTAKE-...",
-  "answers": {},
-  "question": {
-    "key": "day_option",
-    "prompt": "Select the affected day.",
-    "input_type": "single_select",
-    "options": [
-      {"option": 1, "label": "Sunday", "value": "Sunday"},
-      {"option": 2, "label": "Monday", "value": "Monday"},
-      {"option": 3, "label": "Tuesday", "value": "Tuesday"},
-      {"option": 4, "label": "Wednesday", "value": "Wednesday"},
-      {"option": 5, "label": "Thursday", "value": "Thursday"}
-    ]
+  "cancellation_type": "events",
+  "event_ids": ["event_001", "event_002"]
+}
+```
+
+Cancel an entire date:
+
+```json
+{
+  "cancellation_type": "day",
+  "date": "2026-07-08"
+}
+```
+
+The two shapes are mutually exclusive. Event IDs are trimmed and duplicates
+are normalized. Blank or empty event collections, conflicting fields, unknown
+events, dates without schedule events, and already-cancelled events are
+rejected.
+
+If a structured agent proposal fails deterministic schedule validation, the
+backend requests one different proposal using the validation failure as
+corrective feedback. The replacement is validated normally, and the run fails
+safely if the second proposal is invalid or repeats the rejected proposal.
+
+Every agent request includes a manifest of the authoritative `01` through `07`
+workbooks. The read-only agent tools can inspect room availability, equipment,
+student enrollment, the course catalog, the general timetable, exams, and
+doctor schedules directly from the project `fake data` directory.
+
+`202 Accepted`:
+
+```json
+{
+  "schema_version": "1.0",
+  "run_id": "run_0198...",
+  "status": "processing",
+  "created_at": "2026-07-28T09:42:00Z"
+}
+```
+
+## Poll a healing run
+
+Supported statuses are `processing`, `approval_required`, `approved`,
+`rejected`, `partially_completed`, `failed`, and `stale`.
+
+```json
+{
+  "schema_version": "1.0",
+  "run_id": "run_0198...",
+  "status": "approval_required",
+  "created_at": "2026-07-28T09:42:00Z",
+  "completed_at": "2026-07-28T09:42:18Z",
+  "schedule_version": "sha256:abcdef123456",
+  "summary": "One related activity must move.",
+  "requested_cancellation": {
+    "cancellation_type": "events",
+    "date": null,
+    "event_ids": ["event_001"]
   },
-  "ready_to_execute": false
+  "proposed_actions": [
+    {
+      "action_id": "action_a1b2c3",
+      "action_type": "move_time",
+      "event_id": "event_003",
+      "event": {
+        "name": "Power Systems Lecture",
+        "type": "lecture",
+        "room": "C201",
+        "student_group": "G2"
+      },
+      "previous": {
+        "date": "2026-07-07",
+        "start_time": "10:00",
+        "end_time": "12:00",
+        "room": "C201"
+      },
+      "proposed": {
+        "date": "2026-07-07",
+        "start_time": "12:00",
+        "end_time": "14:00",
+        "room": "C205"
+      },
+      "reason": "The room and student group are available.",
+      "display": {
+        "title": "Power Systems Lecture",
+        "detail": "Tuesday 10:00 · C201 → Tuesday 12:00 · C205",
+        "status_label": null
+      }
+    }
+  ],
+  "errors": [],
+  "error": null
 }
 ```
 
-Send exactly one answer to receive the next dropdown:
+Only `move_time` and `move_date` are valid proposal actions. Their `previous`
+and `proposed` positions always contain the date, time range, and room. The
+proposed room may differ when a room change is needed to make the movement
+valid, but a standalone `change_room` action remains invalid. A changed room
+must exist in the active authoritative room inventory and must pass conflict
+validation. Display fields are generated by backend formatters after
+validation; the model cannot supply them.
 
-```http
-POST /api/v1/intake/INTAKE-.../answer
-```
+## Approve or reject
 
-```json
-{"option": 2}
-```
-
-The fixed first three questions are **Day**, **Academic week**, then **Problem**.
-After Problem, the middleware returns only the details relevant to that problem.
-For a multi-select catalog use `{"options": [1, 3]}`; for a positive number use
-`{"number": 80}`; for required free text use `{"text": "explanation"}`.
-
-No disruption, repair, or scheduling tool runs while `status` is `collecting`.
-The selected workflow runs exactly once only after the final confirmation answer
-is option `1`. Confirmation option `2` cancels the intake and runs nothing.
-
-## Full-day prototype request
-
-```json
-{
-  "day_option": 2,
-  "academic_week": 1,
-  "confirmation_option": 1,
-  "maximum_following_weeks": 2,
-  "result_offset": 0,
-  "result_limit": 50
-}
-```
-
-## Day and period view
-
-Monday is day option `2`; P1 is period option `1`:
-
-```http
-GET /api/v1/prototypes/PRT-123/weeks/1/days/2?period_option=1&offset=0&limit=100
-```
-
-The response contains `prototype_timetable.selected_day_schedule.slot_groups`,
-color tokens, counts, sessions, and pagination metadata.
-
-## Generic disruption request
-
-Doctor option numbers come from `/api/v1/catalogs/staff`:
+Approval is all-or-nothing:
 
 ```json
 {
-  "problem_option": 1,
-  "day_option": 2,
-  "academic_week": 1,
-  "resource_options": [1],
-  "scope_option": 1,
-  "start_period_option": 2,
-  "confirmation_option": 1
+  "schema_version": "1.0",
+  "run_id": "run_0198...",
+  "status": "approved",
+  "approved_at": "2026-07-28T09:45:00Z",
+  "summary": "The cancellation of 1 schedule activity and 1 schedule move were applied to the schedule preview.",
+  "applied_action_count": 1,
+  "schedule_version": "preview:sha256:987654321",
+  "error": null
 }
 ```
 
-The API resolves every numeric selection before invoking `report_disruption`.
-Source workbooks remain read-only.
+If source bytes or referenced event positions changed, approval returns `409`
+and:
+
+```json
+{
+  "schema_version": "1.0",
+  "run_id": "run_0198...",
+  "status": "stale",
+  "approved_at": null,
+  "summary": null,
+  "applied_action_count": 0,
+  "schedule_version": null,
+  "error": {
+    "code": "SCHEDULE_VERSION_CONFLICT",
+    "message": "The source schedule changed after this healing run was created. Create a new healing run before approving changes.",
+    "details": null
+  }
+}
+```
+
+Rejection:
+
+```json
+{
+  "schema_version": "1.0",
+  "run_id": "run_0198...",
+  "status": "rejected",
+  "rejected_at": "2026-07-28T09:45:00Z"
+}
+```
+
+## Schedule preview
+
+`GET /api/schedule` returns the normalized source schedule until an approval
+exists, then the latest approved preview:
+
+```json
+{
+  "schema_version": "1.0",
+  "schedule_version": "preview:sha256:987654321",
+  "generated_at": "2026-07-28T09:45:01Z",
+  "events": [
+    {
+      "id": "event_a1b2c3",
+      "name": "Artificial Intelligence",
+      "room": "E203",
+      "type": "lecture",
+      "student_group": "G3",
+      "date": "2026-07-08",
+      "start_time": "10:00",
+      "end_time": "12:00",
+      "status": "cancelled"
+    }
+  ]
+}
+```
+
+Cancelled events are retained, not deleted.
+
+## Change history
+
+Only approved runs are returned, newest first and grouped by run. User
+cancellations use `source: "user"` and `action_type: "cancel"`; validated model
+moves use `source: "agent"`.
+
+```json
+{
+  "schema_version": "1.0",
+  "groups": [
+    {
+      "run_id": "run_0198...",
+      "timestamp": "2026-07-28T09:45:00Z",
+      "summary": "The cancellation and 1 schedule move were approved.",
+      "requested_cancellation": {
+        "cancellation_type": "events",
+        "date": null,
+        "event_ids": ["event_001"]
+      },
+      "changes": [
+        {
+          "action_id": "cancellation_a1b2c3",
+          "source": "user",
+          "action_type": "cancel",
+          "display": {
+            "title": "Artificial Intelligence",
+            "detail": "CANCELLED · G3 · E203",
+            "status_label": "CANCELLED"
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+## Export
+
+The export boundary exists but is intentionally unavailable:
+
+```json
+{
+  "schema_version": "1.0",
+  "status": "not_implemented",
+  "message": "Schedule export is not implemented yet."
+}
+```
+
+The endpoint returns HTTP `501`, creates no file, and never opens a source
+workbook for writing.
+
+## Errors
+
+```json
+{
+  "schema_version": "1.0",
+  "error": {
+    "code": "EVENT_NOT_FOUND",
+    "message": "One or more referenced events do not exist in the current schedule.",
+    "details": null
+  }
+}
+```
+
+Stable codes include `RUN_NOT_FOUND`, `INVALID_CANCELLATION`,
+`EVENT_NOT_FOUND`, `INVALID_AGENT_OUTPUT`, `AGENT_EXECUTION_FAILED`,
+`TOOL_EXECUTION_FAILED`, `SCHEDULE_VERSION_CONFLICT`, `RUN_NOT_APPROVABLE`,
+`RUN_ALREADY_RESOLVED`, `EXPORT_NOT_IMPLEMENTED`, `SCHEDULE_NOT_LOADED`, and
+`PREVIEW_BUILD_FAILED`. Authentication and workspace failures additionally use
+`UNAUTHORIZED`, `API_KEY_NOT_CONFIGURED`, and `INVALID_WORKSPACE`.

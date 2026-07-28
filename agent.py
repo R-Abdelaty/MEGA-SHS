@@ -9,8 +9,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from langchain.agents import create_agent
-from langchain.chat_models import init_chat_model
 from langchain_core.runnables import RunnableConfig
+from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import InMemorySaver
 
 from console_presenter import format_console_result
@@ -125,32 +125,44 @@ class ConsoleProgressTimer:
         print(f"[Finished] Agent completed in {_format_duration(elapsed)}")
 
 
-def _load_anthropic_credentials() -> None:
-    """Load and validate Anthropic credentials before constructing the model."""
+def _load_litellm_credentials() -> str:
+    """Load the iHQ LiteLLM credential before constructing the model."""
     load_dotenv(ENV_FILE)
-    api_key = os.getenv("ANTHROPIC_API_KEY")
+    api_key = os.getenv("LITELLM_API_KEY")
 
     # python-dotenv does not overwrite an existing environment variable by
     # default, even when that variable is an empty string. In that case, use
     # the project-local value explicitly.
     if not api_key or not api_key.strip():
         load_dotenv(ENV_FILE, override=True)
-        api_key = os.getenv("ANTHROPIC_API_KEY")
+        api_key = os.getenv("LITELLM_API_KEY")
 
     if not api_key or not api_key.strip():
         raise RuntimeError(
-            "Anthropic authentication is not configured. Add a nonempty "
-            "ANTHROPIC_API_KEY value to the project .env file or set it in "
+            "LiteLLM authentication is not configured. Add a nonempty "
+            "LITELLM_API_KEY value to the project .env file or set it in "
             "the terminal environment before starting agent.py."
         )
+    return api_key.strip()
 
 
-_load_anthropic_credentials()
+LITELLM_API_KEY = _load_litellm_credentials()
+LITELLM_API_BASE = os.getenv(
+    "LITELLM_API_BASE",
+    "https://litellm.i-hq.tech/v1",
+).strip().rstrip("/")
+MODEL = os.getenv(
+    "LITELLM_MODEL",
+    "anthropic/claude-haiku-4-5",
+).strip()
 
 
-# Same model setup used in the GIU AI Connects project.
-MODEL = "anthropic:claude-haiku-4-5"
-llm = init_chat_model(MODEL)
+# iHQ exposes its LiteLLM gateway through an OpenAI-compatible API.
+llm = ChatOpenAI(
+    model=MODEL,
+    openai_api_key=LITELLM_API_KEY,
+    openai_api_base=LITELLM_API_BASE,
+)
 
 
 SYSTEM_PROMPT = """
@@ -307,23 +319,26 @@ thread_config: RunnableConfig = {
     "configurable": {"thread_id": "self-healing-scheduler"}
 }
 
+AGENT_TOOLS = [
+    get_schedule,
+    retrieve_university_policies,
+    check_priority,
+    check_validity,
+    check_lecturer_or_ta_availability,
+    check_room_availability,
+    cancel_day,
+    report_disruption,
+    find_affected_sessions,
+    run_schedule_repair,
+    compare_schedule_versions,
+    approve_repair,
+]
+
+
 agent = create_agent(
     model=llm,
     system_prompt=SYSTEM_PROMPT,
-    tools=[
-        get_schedule,
-        retrieve_university_policies,
-        check_priority,
-        check_validity,
-        check_lecturer_or_ta_availability,
-        check_room_availability,
-        cancel_day,
-        report_disruption,
-        find_affected_sessions,
-        run_schedule_repair,
-        compare_schedule_versions,
-        approve_repair,
-    ],
+    tools=AGENT_TOOLS,
     checkpointer=checkpointer,
 )
 

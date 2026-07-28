@@ -1,0 +1,58 @@
+:root {
+  color-scheme: light;
+  --bg-primary: #668178;
+  --bg-secondary: #768d84;
+  --surface: #f6f1e6;
+  --surface-muted: #eee7da;
+  --event-bg: #b6c5bc;
+  --event-hover: #bbcac1;
+  --text-primary: #20272c;
+  --text-secondary: #81817e;
+  --border: #d1c6bb;
+  --accent: #c87a6c;
+  --accent-hover: #b96c60;
+  --accent-soft: #ccb5aa;
+
+  --background: var(--bg-primary);
+  --surface-deep: var(--surface);
+  --surface-hover: var(--surface-muted);
+  --calendar-bar: var(--event-bg);
+  --calendar-bar-hover: var(--event-hover);
+  --calendar-bar-text: var(--text-primary);
+  --calendar-lecture: #fae49e;
+  --calendar-lecture-hover: #ecd691;
+  --calendar-tutorial: #e2a4a2;
+  --calendar-tutorial-hover: #d39795;
+  --calendar-quiz: var(--event-bg);
+  --calendar-quiz-hover: var(--event-hover);
+  --text-muted: var(--text-secondary);
+  --text-disabled: var(--text-secondary);
+  --border-strong: var(--border);
+  --border-focus: var(--bg-secondary);
+  --accent-red: var(--accent);
+  --accent-red-dark: var(--accent);
+  --accent-red-dark-hover: var(--accent-hover);
+  --overlay: rgb(32 39 44 / 78%);
+  --panel-border: color-mix(
+    in srgb,
+    var(--bg-primary) 65%,
+    var(--text-primary)
+  );
+  --shadow-raised:
+    0 11px 24px rgb(32 39 44 / 18%),
+    0 3px 7px rgb(32 39 44 / 12%);
+  --shadow-floating:
+    0 22px 54px rgb(32 39 44 / 26%),
+    0 6px 14px rgb(32 39 44 / 15%);
+  --radius: 9px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 14px;
+  --space-4: 20px;
+  --space-5: 28px;
+  --calendar-toolbar-height: 44px;
+  --calendar-toolbar-gap: 6px;
+  --font-family:
+    Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+}
