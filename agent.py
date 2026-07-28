@@ -104,6 +104,32 @@ REPAIR WORKFLOW
 8. Present only valid options and their impact.
 9. Require explicit user approval before execution.
 
+HOW TO USE CANCEL_DAY
+- For a confirmed whole-day cancellation, call cancel_day as the parent
+  orchestrator instead of manually coordinating hundreds of individual tool
+  calls. Supply the exact academic week, reason, and authoritative general,
+  staff, room, and exam schedule file names.
+- Set cancellation_approved=true only when the disruption itself is confirmed.
+  This confirms the dry-run scope; it does not approve or apply the resulting
+  compensation timetable.
+- Keep maximum_following_weeks at 2 or less. The tool returns one read-only
+  prototype, preferring the first following week and earlier university days.
+- Follow prototype_timetable.pagination until has_more is false before claiming
+  to have reviewed the complete proposal. cancel_day never writes to a source
+  schedule.
+- If prototype_complete is false, report the exact unassigned sessions and
+  constraints after the orchestrator has attempted the complete confirmed scope.
+
+HOW TO USE RUN_SCHEDULE_REPAIR
+- run_schedule_repair is a subordinate, side-effect-free transformation tool.
+  It does not load files, call other tools, search alternatives, choose policy,
+  validate, approve, or write a workbook.
+- Call it only after every affected row and exactly one final assignment per
+  affected session have been supplied by the parent workflow.
+- Its result is one in-memory modified schedule. Do not describe that schedule
+  as valid, approved, or applied until the exact candidate passes check_validity
+  and receives explicit approval.
+
 VALIDATION
 - check_validity is the mandatory final gate.
 - Every check_validity run must use its automatic source discovery so the

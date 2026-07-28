@@ -18,6 +18,8 @@ from langchain.tools import tool
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 FAKE_DATA_DIR = (PROJECT_ROOT / "fake data").resolve()
 SUPPORTED_EXTENSIONS = {".xlsx", ".xlsm", ".xls", ".pdf"}
+_TABLE_CACHE: dict[tuple[str, int, int], list[pd.DataFrame]] = {}
+MAX_TABLE_CACHE_ENTRIES = 8
 
 DAYS = {
     "sun": "sunday",
@@ -234,7 +236,14 @@ def _load_tables(file_path: str) -> tuple[Path, list[pd.DataFrame]]:
             "Upload an Excel (.xlsx, .xlsm, or .xls) or PDF (.pdf) file.",
         )
 
-    tables = _load_pdf(path) if path.suffix.casefold() == ".pdf" else _load_excel(path)
+    stat = path.stat()
+    cache_key = (str(path), stat.st_mtime_ns, stat.st_size)
+    tables = _TABLE_CACHE.get(cache_key)
+    if tables is None:
+        tables = _load_pdf(path) if path.suffix.casefold() == ".pdf" else _load_excel(path)
+        if len(_TABLE_CACHE) >= MAX_TABLE_CACHE_ENTRIES:
+            _TABLE_CACHE.pop(next(iter(_TABLE_CACHE)))
+        _TABLE_CACHE[cache_key] = tables
     if not tables:
         raise RoomAvailabilityInputError(
             "No reliable room table was found in the uploaded file.",

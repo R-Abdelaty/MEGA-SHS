@@ -875,7 +875,6 @@ def get_schedule(
     A response marked truncated, partial, or error is incomplete data: narrow the
     request or paginate, and never invent the missing content.
     """
-    print("getScheduleUSED")
     if not FAKE_DATA_DIR.is_dir():
         return _error(
             "fake_data_folder_missing",

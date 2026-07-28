@@ -42,23 +42,22 @@ PRIORITY_POLICY: dict[str, dict[str, Any]] = {
         ),
     },
     "laboratory": {
-        "tier": 1,
-        "level": "low",
-        "base_score": 100,
+        "tier": 2,
+        "level": "medium",
+        "base_score": 200,
         "label": "Laboratory",
         "policy_reason": (
-            "Laboratories follow tutorials in the confirmed repair hierarchy; "
+            "Laboratories rank after lectures and before tutorials; "
             "equipment, room type, capacity, and staff constraints remain mandatory."
         ),
     },
     "tutorial": {
-        "tier": 2,
-        "level": "medium",
-        "base_score": 200,
+        "tier": 1,
+        "level": "low",
+        "base_score": 100,
         "label": "Tutorial",
         "policy_reason": (
-            "Tutorials rank after lectures and before laboratories under the "
-            "confirmed repair hierarchy."
+            "Tutorials follow laboratories under the confirmed repair hierarchy."
         ),
     },
 }
@@ -753,11 +752,11 @@ def check_priority(
             "strict_hierarchy": [
                 "exam_or_quiz",
                 "lecture",
-                "tutorial",
                 "laboratory",
+                "tutorial",
             ],
             "hierarchy_display": (
-                "Exam or Quiz > Lecture > Tutorial > Laboratory"
+                "Exam or Quiz > Lecture > Laboratory > Tutorial"
             ),
             "tie_breaker_rule": (
                 "Impact and complexity bonuses apply only within a tier and can never "

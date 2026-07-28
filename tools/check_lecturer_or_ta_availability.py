@@ -674,10 +674,14 @@ def check_lecturer_or_ta_availability(
     proposed_start: str,
     proposed_end: str,
     academic_week: int | None = None,
+    schedule_rows: list[dict[str, Any]] | None = None,
 ) -> str:
     """Check whether lecturers or teaching assistants are free for a period.
 
-    Load the uploaded staff schedule exclusively through ``get_schedule``. Staff
+    Load the uploaded staff schedule through ``get_schedule``. A parent
+    orchestrator that has already retrieved the complete authoritative schedule
+    may pass those records through ``schedule_rows`` to avoid reopening the same
+    workbook for every bulk availability check. Staff
     can be supplied by exact ID or full name. A staff member is unavailable when
     a scheduled session overlaps any part of the proposed interval; immediately
     adjacent sessions do not conflict. The result is structured JSON and never
@@ -694,6 +698,9 @@ def check_lecturer_or_ta_availability(
         "proposed_start": proposed_start,
         "proposed_end": proposed_end,
         "academic_week": academic_week,
+        "preloaded_schedule_row_count": (
+            len(schedule_rows) if isinstance(schedule_rows, list) else None
+        ),
     }
 
     try:
@@ -707,6 +714,11 @@ def check_lecturer_or_ta_availability(
             raise AvailabilityInputError("proposed_end must be later than proposed_start.")
         if academic_week is not None and (not isinstance(academic_week, int) or academic_week < 1):
             raise AvailabilityInputError("academic_week must be a positive integer.")
+        if schedule_rows is not None and (
+            not isinstance(schedule_rows, list)
+            or any(not isinstance(row, dict) for row in schedule_rows)
+        ):
+            raise AvailabilityInputError("schedule_rows must be a list of schedule objects.")
     except AvailabilityInputError as exc:
         return _json(
             {
@@ -720,9 +732,24 @@ def check_lecturer_or_ta_availability(
     results: list[dict[str, Any]] = []
     for identifier in cleaned_ids:
         try:
-            records, context, resolved_identifier = _load_staff_schedule(
-                str(uploaded_file_path).strip(), identifier
-            )
+            if schedule_rows is None:
+                records, context, resolved_identifier = _load_staff_schedule(
+                    str(uploaded_file_path).strip(), identifier
+                )
+            else:
+                records = [
+                    record
+                    for record in schedule_rows
+                    if _has_session_fields(record)
+                    and _record_matches_staff(record, identifier)
+                ]
+                if not records:
+                    raise ScheduleLookupError(
+                        "The requested lecturer or teaching assistant was not found in the preloaded schedule.",
+                        {"requested_staff": identifier},
+                    )
+                context = []
+                resolved_identifier = identifier
             results.append(
                 _evaluate_staff(
                     identifier=identifier,
