@@ -25,6 +25,30 @@ from .get_schedule import FAKE_DATA_DIR
 
 
 SUPPORTED_EXCEL_EXTENSIONS = {".xlsx", ".xlsm"}
+SUPPORTED_DATA_EXTENSIONS = SUPPORTED_EXCEL_EXTENSIONS | {".pdf"}
+NON_AUTHORITATIVE_FILE_MARKERS = {
+    "adjusted",
+    "backup",
+    "copy",
+    "corrupt",
+    "corrupted",
+    "draft",
+    "old",
+    "test",
+}
+AUTHORITATIVE_FILE_PREFIX_PATTERN = re.compile(r"^0[1-7]")
+FILE_REFERENCE_STOP_WORDS = {
+    "a",
+    "an",
+    "data",
+    "fake",
+    "file",
+    "files",
+    "folder",
+    "in",
+    "inside",
+    "the",
+}
 DAY_NAMES = {
     "monday",
     "tuesday",
@@ -424,6 +448,94 @@ def _is_inside(child: Path, parent: Path) -> bool:
         return False
 
 
+def _is_non_authoritative_variant(path: Path) -> bool:
+    """Return whether a file name identifies a test or alternate copy."""
+    normalized = _normalize_label(path.stem)
+    words = set(normalized.split())
+    return bool(words.intersection(NON_AUTHORITATIVE_FILE_MARKERS))
+
+
+def _discover_authoritative_data_files() -> list[str]:
+    """Discover authoritative 01-through-07 data without supplied paths."""
+    if not FAKE_DATA_DIR.is_dir():
+        return []
+
+    return [
+        path.name
+        for path in sorted(
+            FAKE_DATA_DIR.iterdir(), key=lambda item: item.name.casefold()
+        )
+        if (
+            path.is_file()
+            and not path.name.startswith("~$")
+            and path.suffix.casefold() in SUPPORTED_DATA_EXTENSIONS
+            and AUTHORITATIVE_FILE_PREFIX_PATTERN.match(path.name) is not None
+            and not _is_non_authoritative_variant(path)
+        )
+    ]
+
+
+def _is_self_contained_validation_workbook(path: Path) -> bool:
+    """Detect a workbook carrying its own schedule and supporting sources."""
+    if path.suffix.casefold() not in SUPPORTED_EXCEL_EXTENSIONS:
+        return False
+
+    workbook = None
+    try:
+        workbook = load_workbook(path, read_only=True, data_only=True)
+        sheet_names = {
+            _normalize_label(name) for name in workbook.sheetnames
+        }
+        has_sessions = any(
+            name in {"schedule", "general schedule", "semester timetable"}
+            for name in sheet_names
+        )
+        has_rooms = any("room inventory" in name for name in sheet_names)
+        has_reservations = any(
+            "room schedule" in name for name in sheet_names
+        )
+        has_doctors = any(
+            "doctor schedule" in name for name in sheet_names
+        )
+        return has_sessions and has_rooms and has_reservations and has_doctors
+    except Exception:
+        return False
+    finally:
+        if workbook is not None:
+            workbook.close()
+
+
+def _prepare_validation_file_list(
+    schedule_files: list[str] | None,
+) -> tuple[list[str], list[str], bool]:
+    """Combine explicit targets with automatically discovered source files."""
+    explicit_files = [
+        str(value).strip()
+        for value in (schedule_files or [])
+        if str(value).strip()
+    ]
+
+    isolated_fixture = False
+    if len(explicit_files) == 1:
+        explicit_path, resolution_error = _resolve_file(explicit_files[0])
+        if explicit_path is not None and resolution_error is None:
+            isolated_fixture = (
+                _is_non_authoritative_variant(explicit_path)
+                or _is_self_contained_validation_workbook(explicit_path)
+            )
+
+    auto_discovered = [] if isolated_fixture else _discover_authoritative_data_files()
+    explicit_names = {
+        Path(value).name.casefold() for value in explicit_files
+    }
+    auto_added = [
+        value
+        for value in auto_discovered
+        if Path(value).name.casefold() not in explicit_names
+    ]
+    return explicit_files + auto_added, auto_added, isolated_fixture
+
+
 def _resolve_file(file_name: str) -> tuple[Path | None, dict[str, Any] | None]:
     requested = Path(str(file_name).strip().strip("\"'"))
     if not requested.name:
@@ -448,12 +560,17 @@ def _resolve_file(file_name: str) -> tuple[Path | None, dict[str, Any] | None]:
             "message": "An Office lock file is not a schedule source.",
         }
     if not candidate.is_file():
-        matches = [
+        available_paths = [
             path
             for path in FAKE_DATA_DIR.iterdir()
             if path.is_file()
             and not path.name.startswith("~$")
-            and (
+            and path.suffix.casefold() in SUPPORTED_DATA_EXTENSIONS
+        ]
+        matches = [
+            path
+            for path in available_paths
+            if (
                 path.name.casefold() == requested.name.casefold()
                 or (
                     not requested.suffix
@@ -464,11 +581,45 @@ def _resolve_file(file_name: str) -> tuple[Path | None, dict[str, Any] | None]:
         if len(matches) == 1:
             candidate = matches[0].resolve()
         else:
-            return None, {
-                "file": file_name,
-                "code": "file_not_found",
-                "message": "The requested schedule file was not found.",
+            requested_tokens = {
+                token
+                for token in _normalize_label(requested.stem).split()
+                if token not in FILE_REFERENCE_STOP_WORDS
             }
+            natural_matches = []
+            if requested_tokens:
+                for path in available_paths:
+                    candidate_tokens = {
+                        token
+                        for token in _normalize_label(path.stem).split()
+                        if token not in FILE_REFERENCE_STOP_WORDS
+                    }
+                    if (
+                        requested_tokens == candidate_tokens
+                        or requested_tokens.issuperset(candidate_tokens)
+                        or candidate_tokens.issuperset(requested_tokens)
+                    ):
+                        natural_matches.append(path)
+            if len(natural_matches) == 1:
+                candidate = natural_matches[0].resolve()
+            elif len(natural_matches) > 1:
+                return None, {
+                    "file": file_name,
+                    "code": "ambiguous_file_name",
+                    "message": (
+                        "The natural-language file reference matches multiple "
+                        "schedule files."
+                    ),
+                    "matches": [
+                        path.name for path in sorted(natural_matches)
+                    ],
+                }
+            else:
+                return None, {
+                    "file": file_name,
+                    "code": "file_not_found",
+                    "message": "The requested schedule file was not found.",
+                }
     return candidate, None
 
 
@@ -1750,12 +1901,20 @@ def check_validity(
 ) -> str:
     """Normalize user schedule files and exhaustively check them for conflicts.
 
-    Supply every authoritative current source relevant to the requested scope in
-    one call. For a complete university validation this normally includes the
-    general, room, doctor, and exam schedules, plus enrollment/equipment sources
-    when needed. If the user explicitly names files, validate exactly those
-    files. Do not include two alternative versions of one schedule unless the
-    request is a comparison.
+    Every call automatically discovers and validates the current authoritative
+    Excel/PDF files in ``fake data`` whose names begin with ``01`` through
+    ``07``. Exact file paths are not required. Unnumbered files and files
+    clearly named as tests, corrupted data, drafts, backups, or
+    adjusted/alternate copies are excluded from normal discovery; they are
+    included only when explicitly requested. An explicitly supplied candidate
+    is evaluated first so it takes precedence over mirrored baseline session
+    IDs. A self-contained or explicitly named test fixture is validated in
+    isolation to prevent it from contaminating production schedule checks.
+    ``schedule_files`` accepts exact names, paths, or natural-language
+    references. A unique reference such as ``"test schedule file in fake data
+    folder"`` is resolved automatically; never request an exact filename when
+    this unique match succeeds. Ambiguous references return their candidates
+    and require confirmation.
 
     First call without ``column_mappings`` so familiar headers are mapped
     automatically. If ``mapping_requests`` are returned, inspect the exact
@@ -1781,10 +1940,17 @@ def check_validity(
     tool again on the exact repaired sources. For a validity-only user request,
     return the tool's ``concise_response`` exactly.
     """
+    explicit_file_count = len(schedule_files or [])
+    schedule_files, auto_discovered_files, isolated_fixture = (
+        _prepare_validation_file_list(schedule_files)
+    )
     if not schedule_files:
         return _error(
             "no_schedule_files",
-            "At least one schedule file must be supplied for validation.",
+            (
+                "No supported schedule data files were found. Add an Excel or "
+                "PDF file to the fake data folder or supply a valid file name."
+            ),
         )
     if not FAKE_DATA_DIR.is_dir():
         return _error(
@@ -2228,7 +2394,17 @@ def check_validity(
             "validation_complete": validation_complete,
             "concise_response": concise_response,
             "summary": {
-                "requested_file_count": len(schedule_files),
+                "requested_file_count": explicit_file_count,
+                "auto_discovered_file_count": len(auto_discovered_files),
+                "evaluated_file_count": (
+                    len(resolved_paths) + len(unsupported_sources)
+                ),
+                "files_evaluated": [
+                    path.name for path in resolved_paths
+                ] + [
+                    str(item["file"]) for item in unsupported_sources
+                ],
+                "isolated_test_fixture": isolated_fixture,
                 "workbooks_read": len(resolved_paths) - len(extraction_errors),
                 "source_region_count": len(regions),
                 "session_records_checked": len(sessions),

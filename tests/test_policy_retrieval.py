@@ -62,12 +62,56 @@ class PolicyRetrievalTests(unittest.TestCase):
         self.assertIn("mapping_requests", validity_description)
         self.assertIn("validation_complete", validity_description)
         self.assertIn("Never use ``ignore``", validity_description)
+        self.assertIn("automatically discovers", validity_description)
+        self.assertIn("Exact file paths are not required", validity_description)
 
         approval_description = " ".join(
             approval_module.approve_repair.description.split()
         )
         self.assertIn("explicitly approved", approval_description)
         self.assertIn("validation_complete == true", approval_description)
+
+    def test_validator_discovers_authoritative_files_without_paths(self) -> None:
+        validity_module = importlib.import_module("tools.check_validity")
+        discovered = validity_module._discover_authoritative_data_files()
+        normalized = {name.casefold() for name in discovered}
+
+        self.assertIn("05_general_schedule.xlsx", normalized)
+        self.assertIn("01_room_schedule.xlsx", normalized)
+        self.assertIn("07_doctor_schedule_calendar.xlsx", normalized)
+        self.assertNotIn("test schedule.xlsx", normalized)
+        self.assertNotIn("corrupted schedule.xlsx", normalized)
+        self.assertNotIn("general schedule calendar.xlsx", normalized)
+        self.assertTrue(
+            all(name[:2] in {f"0{number}" for number in range(1, 8)}
+                for name in normalized)
+        )
+
+    def test_explicit_test_fixture_is_isolated(self) -> None:
+        validity_module = importlib.import_module("tools.check_validity")
+        files, auto_added, isolated = (
+            validity_module._prepare_validation_file_list(
+                ["Test Schedule.xlsx"]
+            )
+        )
+        self.assertEqual(files, ["Test Schedule.xlsx"])
+        self.assertEqual(auto_added, [])
+        self.assertTrue(isolated)
+
+    def test_natural_language_test_schedule_reference_is_resolved(self) -> None:
+        validity_module = importlib.import_module("tools.check_validity")
+        schedule_module = importlib.import_module("tools.get_schedule")
+        reference = "test schedule file in fake data folder"
+
+        validity_path, validity_error = validity_module._resolve_file(reference)
+        schedule_path, schedule_error = (
+            schedule_module._resolve_requested_file(reference)
+        )
+
+        self.assertIsNone(validity_error)
+        self.assertIsNone(schedule_error)
+        self.assertEqual(validity_path.name, "Test Schedule.xlsx")
+        self.assertEqual(schedule_path.name, "Test Schedule.xlsx")
 
 
 if __name__ == "__main__":

@@ -43,6 +43,18 @@ QUERY_SYNONYMS = {
     "lectures": "lecture",
     "labs": "lab",
 }
+FILE_REFERENCE_STOP_WORDS = {
+    "a",
+    "an",
+    "data",
+    "fake",
+    "file",
+    "files",
+    "folder",
+    "in",
+    "inside",
+    "the",
+}
 FILTER_HEADER_PREFERENCES: dict[str, list[str]] = {
     "student groups": [
         "Cohort Group(s)",
@@ -198,6 +210,34 @@ def _resolve_requested_file(requested_value: str) -> tuple[Path | None, str | No
             "ambiguous_file_name",
             "The requested name matches multiple files. Use an exact file name.",
             matches=[path.name for path in sorted(partial_matches)],
+        )
+
+    requested_tokens = {
+        token
+        for token in _normalize_label(requested.stem).split()
+        if token not in FILE_REFERENCE_STOP_WORDS
+    }
+    natural_matches = []
+    if requested_tokens:
+        for path in available_paths:
+            candidate_tokens = {
+                token
+                for token in _normalize_label(path.stem).split()
+                if token not in FILE_REFERENCE_STOP_WORDS
+            }
+            if (
+                requested_tokens == candidate_tokens
+                or requested_tokens.issuperset(candidate_tokens)
+                or candidate_tokens.issuperset(requested_tokens)
+            ):
+                natural_matches.append(path)
+    if len(natural_matches) == 1:
+        return natural_matches[0].resolve(), None
+    if len(natural_matches) > 1:
+        return None, _error(
+            "ambiguous_file_name",
+            "The natural-language file reference matches multiple files.",
+            matches=[path.name for path in sorted(natural_matches)],
         )
 
     return None, _error(
@@ -806,10 +846,14 @@ def get_schedule(
 ) -> str:
     """Extract AI-ready data from an Excel or PDF file in the fake data folder.
 
-    Set ``uploaded_file_path`` to the exact schedule file name when possible.
-    Never infer a file's contents from its name. If the correct Excel worksheet
-    is unknown, call with the file name first and use the returned workbook
-    discovery/index before selecting ``sheet_name``.
+    ``uploaded_file_path`` may be an exact path/name or a natural-language file
+    reference such as ``"test schedule file in fake data folder"``. The tool
+    automatically resolves a unique filename, stem, partial-name, or word
+    match. Exact paths are not required. An ambiguous reference returns the
+    candidate filenames instead of guessing. Never infer a file's contents from
+    its name. If the correct Excel worksheet is unknown, call with the resolved
+    file reference first and use the returned workbook discovery/index before
+    selecting ``sheet_name``.
 
     Use ``filters`` for precise or exhaustive Excel retrieval. Filters use AND
     logic and may reference exact uploaded headers or supported canonical fields:
@@ -831,13 +875,13 @@ def get_schedule(
     A response marked truncated, partial, or error is incomplete data: narrow the
     request or paginate, and never invent the missing content.
     """
+    print("getScheduleUSED")
     if not FAKE_DATA_DIR.is_dir():
         return _error(
             "fake_data_folder_missing",
             "The fake data folder does not exist.",
             expected_path=str(FAKE_DATA_DIR),
         )
-    print("getScheduleUSED")
     path, resolution_error = _resolve_requested_file(uploaded_file_path)
     if resolution_error:
         return resolution_error
