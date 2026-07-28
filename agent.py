@@ -234,6 +234,15 @@ HOW TO USE CANCEL_DAY
   teaching day after the cancellation: use the remaining days of that academic
   week first, then at most the next two teaching weeks. Never place compensation
   on the cancelled day or an earlier day in the cancelled week.
+- Never place a compensation session on a student group's normal day off. The
+  selected weekday must already be a scheduled weekday for every tutorial or
+  lecture group attached to that session; leave it unassigned if no such valid
+  placement exists in the permitted window.
+- Treat extreme_case.alerts as exceptional decision notices only. Near a
+  midterm, major exam, or final, clearly identify the affected groups and state
+  whether explicit authorization for day-off attendance or an additional
+  official compensation day is required. Never claim that either exception was
+  scheduled, approved, or applied by the tool.
 - Follow prototype_timetable.pagination until has_more is false before claiming
   to have reviewed the complete proposal. cancel_day never writes to a source
   schedule.

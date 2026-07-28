@@ -8,8 +8,8 @@ confirmation.
 - A student cohort cannot be assigned to overlapping sessions.
 - A repair must preserve valid cohort/course assignments.
 - Minimize affected students and preserve unaffected sessions.
-- Scheduling on a student's day off is a last resort in cancellation
-  compensation.
+- Cancellation compensation must not be scheduled on a student group's normal
+  day off.
 
 ## Requires confirmation
 

@@ -95,6 +95,10 @@ class CancelDayTests(unittest.TestCase):
             "N1", "Tutorial", "P3", "13:00", "14:30", "G3", "TA Two", "Tutorial Room"
         )
         self.normal_monday["day"] = "Monday"
+        self.normal_monday["student_groups"] = "G1; G2; G3"
+        self.extra_general_rows: list[dict] = []
+        self.regular_exam_rows: list[dict] = []
+        self.final_exam_rows: list[dict] = []
         self.report_tool = FakeTool(
             {
                 "status": "success",
@@ -134,10 +138,18 @@ class CancelDayTests(unittest.TestCase):
             sheet = arguments["sheet_name"]
             if sheet == "Semester Timetable":
                 return extraction_payload(
-                    [self.lecture, self.tutorial, self.normal_monday], sheet
+                    [
+                        self.lecture,
+                        self.tutorial,
+                        self.normal_monday,
+                        *self.extra_general_rows,
+                    ],
+                    sheet,
                 )
             if sheet == "Regular Assessments":
-                return extraction_payload([], sheet)
+                return extraction_payload(self.regular_exam_rows, sheet)
+            if sheet == "Final Exams":
+                return extraction_payload(self.final_exam_rows, sheet)
             if sheet == "Doctor Directory":
                 return extraction_payload([{"Doctor ID": "D1", "Doctor Name": "Dr. One"}], sheet)
             raise AssertionError(f"Unexpected sheet: {sheet}")
@@ -241,7 +253,62 @@ class CancelDayTests(unittest.TestCase):
                 "same_or_earlier_cancelled_week_days_allowed"
             ]
         )
+        self.assertTrue(
+            result["constraint_summary"]["student_group_existing_day_required"]
+        )
+        self.assertFalse(
+            result["constraint_summary"]["student_group_days_off_allowed"]
+        )
+        self.assertFalse(result["extreme_case"]["active"])
+        self.assertEqual(result["extreme_case"]["alerts"], [])
         self.assertEqual(result["approval"]["status"], "not_requested")
+
+    def test_tutorial_compensation_never_uses_its_group_day_off(self) -> None:
+        self.normal_monday["student_groups"] = "G1; G3"
+
+        result = self.invoke(result_limit=10)
+
+        assignments = {
+            item["session_id"]: item
+            for item in result["prototype_timetable"]["sessions"]
+        }
+        self.assertEqual(assignments["S1"]["academic_week"], 1)
+        self.assertEqual(assignments["S1"]["day"], "Monday")
+        self.assertEqual(assignments["S2"]["academic_week"], 2)
+        self.assertEqual(assignments["S2"]["day"], "Sunday")
+        self.assertGreater(
+            result["constraint_summary"]["rejection_counts"].get(
+                "student_group_day_off", 0
+            ),
+            0,
+        )
+
+    def test_lecture_requires_a_normal_day_shared_by_every_group(self) -> None:
+        self.lecture["student_groups"] = "G1; G2"
+        self.tutorial["student_groups"] = "G3"
+        self.normal_monday["student_groups"] = "G1; G3"
+        normal_tuesday = session(
+            "N2",
+            "Tutorial",
+            "P3",
+            "13:00",
+            "14:30",
+            "G2",
+            "TA Three",
+            "Tutorial Room",
+        )
+        normal_tuesday["day"] = "Tuesday"
+        self.extra_general_rows.append(normal_tuesday)
+
+        result = self.invoke(result_limit=10)
+
+        lecture_assignment = next(
+            item
+            for item in result["prototype_timetable"]["sessions"]
+            if item["session_id"] == "S1"
+        )
+        self.assertEqual(lecture_assignment["academic_week"], 2)
+        self.assertEqual(lecture_assignment["day"], "Sunday")
 
     def test_requires_explicit_cancellation_confirmation(self) -> None:
         result = self.invoke(cancellation_approved=False)
@@ -328,6 +395,130 @@ class CancelDayTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "invalid_request")
         self.assertIn("finals blackout", result["summary"])
+
+    def test_extreme_final_alert_identifies_groups_without_relaxing_day_off_rule(self) -> None:
+        for affected_session in (self.lecture, self.tutorial):
+            affected_session.pop("major", None)
+            affected_session["Major(s)"] = "Computer Science and Engineering"
+            affected_session["Major Code(s)"] = "CSE"
+        self.final_exam_rows.append(
+            {
+                "Exam ID": "FINAL-CSE-Y1",
+                "Major(s)": "Computer Science and Engineering",
+                "Year": 1,
+                "Course ID": "C-FINAL",
+                "Course Name": "CSE Final",
+                "Exam Type": "Final Exam",
+                "Week": 13,
+                "Day": "Sunday",
+                "Start": "09:00",
+                "End": "10:30",
+            }
+        )
+        self.room_tool = FakeTool(
+            {
+                "status": "success",
+                "available_room_count": 0,
+                "available_rooms": [],
+            }
+        )
+
+        result = self.invoke(academic_week=10, result_limit=10)
+
+        self.assertEqual(result["status"], "information_required")
+        self.assertTrue(result["extreme_case"]["active"])
+        self.assertTrue(result["extreme_case"]["normal_constraints_remain_enforced"])
+        self.assertFalse(result["extreme_case"]["automatic_exception_applied"])
+        alerts = {
+            item["code"]: item for item in result["extreme_case"]["alerts"]
+        }
+        self.assertEqual(
+            set(alerts),
+            {
+                "EXTREME_DAY_OFF_AUTHORIZATION_REQUIRED",
+                "EXTREME_EXTRA_COMPENSATION_DAY_REQUIRED",
+            },
+        )
+        day_off_sessions = alerts[
+            "EXTREME_DAY_OFF_AUTHORIZATION_REQUIRED"
+        ]["affected_sessions"]
+        self.assertEqual(
+            {group for item in day_off_sessions for group in item["student_groups"]},
+            {"G1", "G2"},
+        )
+        self.assertTrue(
+            alerts["EXTREME_DAY_OFF_AUTHORIZATION_REQUIRED"][
+                "requires_explicit_authorization"
+            ]
+        )
+        self.assertFalse(
+            alerts["EXTREME_EXTRA_COMPENSATION_DAY_REQUIRED"][
+                "automatic_schedule_change"
+            ]
+        )
+        self.assertEqual(result["prototype_timetable"]["sessions"], [])
+        self.assertFalse(result["source_files_modified"])
+
+    def test_nearby_midterm_can_trigger_extra_day_alert(self) -> None:
+        self.regular_exam_rows.append(
+            {
+                "Assessment ID": "MID-CSE-Y1",
+                "Major": "CSE",
+                "Year": 1,
+                "Course ID": "C-MID",
+                "Course Name": "CSE Midterm",
+                "Assessment Type": "Midterm Exam",
+                "Week": 7,
+                "Day": "Thursday",
+                "Start": "08:30",
+                "End": "10:00",
+            }
+        )
+        self.room_tool = FakeTool(
+            {
+                "status": "success",
+                "available_room_count": 0,
+                "available_rooms": [],
+            }
+        )
+
+        result = self.invoke(academic_week=5, maximum_following_weeks=1)
+
+        alerts = {
+            item["code"]: item for item in result["extreme_case"]["alerts"]
+        }
+        self.assertIn("EXTREME_EXTRA_COMPENSATION_DAY_REQUIRED", alerts)
+        assessments = alerts[
+            "EXTREME_EXTRA_COMPENSATION_DAY_REQUIRED"
+        ]["affected_sessions"][0]["nearby_major_assessments"]
+        self.assertEqual(assessments[0]["classification"], "midterm_exam")
+        self.assertEqual(assessments[0]["academic_week"], 7)
+
+    def test_distant_major_exam_does_not_trigger_extreme_alert(self) -> None:
+        self.regular_exam_rows.append(
+            {
+                "Assessment ID": "MID-CSE-Y1",
+                "Major": "CSE",
+                "Year": 1,
+                "Assessment Type": "Midterm Exam",
+                "Week": 9,
+                "Day": "Thursday",
+                "Start": "08:30",
+                "End": "10:00",
+            }
+        )
+        self.room_tool = FakeTool(
+            {
+                "status": "success",
+                "available_room_count": 0,
+                "available_rooms": [],
+            }
+        )
+
+        result = self.invoke(academic_week=1, maximum_following_weeks=1)
+
+        self.assertFalse(result["extreme_case"]["active"])
+        self.assertEqual(result["extreme_case"]["alerts"], [])
 
     def test_reports_progress_without_changing_the_result(self) -> None:
         events: list[tuple[str, int | None, int | None]] = []

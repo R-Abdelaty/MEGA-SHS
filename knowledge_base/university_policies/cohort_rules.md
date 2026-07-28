@@ -12,8 +12,7 @@ Policy status: CONFIGURED, with one fallback procedure requiring confirmation.
 
 ## Requires confirmation
 
-- The existing cancellation text mentions using another compatible tutorial or
-  lecture group before scheduling on a student's day off. Exact eligibility,
-  capacity, attendance, and approval rules for a same-major group transfer were
-  not supplied. Treat that fallback as unavailable until confirmed for the
-  specific case.
+- Exact eligibility, capacity, attendance, and approval rules for a same-major
+  group transfer were not supplied. Treat that fallback as unavailable until
+  confirmed for the specific case; it cannot be used to bypass the rule against
+  scheduling a group on its normal day off.

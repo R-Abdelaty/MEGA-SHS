@@ -9,7 +9,8 @@ python -m unittest discover -s tests -v
 Run the single comprehensive console check. This runs the complete automated
 suite, creates a real Monday/week-1 cancellation prototype from the fake data,
 validates the candidate, and confirms that all seven source workbooks remain
-byte-for-byte unchanged:
+byte-for-byte unchanged. It also independently checks every compensation row
+and fails if any attached student group is placed on its normal day off:
 
 ```powershell
 & "C:\Users\tarek sherif\AppData\Local\Programs\Python\Python314\python.exe" .\tests\run_everything_console.py
@@ -66,3 +67,9 @@ The first calculation can take several minutes because it processes the full
 cancelled-day scope. Compensation starts on the next teaching day, using the
 remaining days of the cancelled week before the following one or two weeks. It
 prints a paginated prototype and never writes to the source workbooks.
+
+The cancellation response also includes `extreme_case.alerts`. These alerts are
+inactive in normal cases. Near a midterm, major exam, or final, an unassigned
+session can raise explicit-authorization alerts for day-off attendance and an
+additional official compensation day. The test suite verifies that neither
+exception is scheduled or applied automatically.

@@ -140,6 +140,63 @@ def _staff_members(value: Any) -> list[str]:
     ]
 
 
+def _student_group_days(path: Path) -> dict[str, set[str]]:
+    workbook = load_workbook(path, read_only=True, data_only=True)
+    try:
+        sheet = workbook["Semester Timetable"]
+        headers = {
+            str(cell.value).strip(): index
+            for index, cell in enumerate(sheet[4])
+            if cell.value not in (None, "")
+        }
+        group_column = headers["Cohort Group(s)"]
+        day_column = headers["Day"]
+        status_column = headers.get("Status")
+        result: dict[str, set[str]] = {}
+        for values in sheet.iter_rows(min_row=5, values_only=True):
+            if status_column is not None and str(values[status_column] or "").strip().casefold() in {
+                "cancelled",
+                "canceled",
+                "inactive",
+                "deleted",
+            }:
+                continue
+            day = str(values[day_column] or "").strip()
+            if not day:
+                continue
+            for group in _staff_members(values[group_column]):
+                result.setdefault(group.casefold(), set()).add(day)
+        return result
+    finally:
+        workbook.close()
+
+
+def _day_off_violations(
+    prototype_rows: list[dict[str, Any]],
+    general_schedule_path: Path,
+) -> list[dict[str, Any]]:
+    group_days = _student_group_days(general_schedule_path)
+    violations = []
+    for row in prototype_rows:
+        target_day = str(row.get("day") or "").strip()
+        groups = _staff_members(row.get("student_groups"))
+        groups_on_day_off = [
+            group
+            for group in groups
+            if target_day not in group_days.get(group.casefold(), set())
+        ]
+        if groups_on_day_off:
+            violations.append(
+                {
+                    "session_id": row.get("session_id"),
+                    "academic_week": row.get("academic_week"),
+                    "day": target_day,
+                    "groups_on_day_off": groups_on_day_off,
+                }
+            )
+    return violations
+
+
 def _write_candidate(
     path: Path,
     prototype_rows: list[dict[str, Any]],
@@ -257,6 +314,10 @@ def main() -> int:
         )
 
     hashes_after = {path.name: _hash(path) for path in source_paths}
+    day_off_violations = _day_off_violations(
+        prototype_rows,
+        FAKE_DATA_DIR / "05_General_Schedule.xlsx",
+    )
     baseline_summary = baseline.get("summary") or {}
     combined_summary = combined.get("summary") or {}
     code_delta = _positive_delta(
@@ -289,18 +350,50 @@ def main() -> int:
         "baseline_extraction_errors": baseline.get("extraction_errors"),
         "combined_extraction_errors": combined.get("extraction_errors"),
         "source_files_modified": hashes_before != hashes_after,
+        "student_group_day_off_violation_count": len(day_off_violations),
+        "student_group_day_off_violations": day_off_violations[:20],
+        "extreme_case_active": (prototype.get("extreme_case") or {}).get(
+            "active"
+        ),
+        "extreme_case_alert_codes": [
+            alert.get("code")
+            for alert in (prototype.get("extreme_case") or {}).get("alerts", [])
+        ],
+        "automatic_exception_applied": (
+            prototype.get("extreme_case") or {}
+        ).get("automatic_exception_applied"),
         "elapsed_seconds": round(time.perf_counter() - started, 2),
     }
+    result["prototype_outcome_accounted_for"] = (
+        result["affected_session_count"]
+        == result["proposed_session_count"] + result["unassigned_session_count"]
+    )
+    result["prototype_status_consistent"] = (
+        result["prototype_status"] == "success"
+        and result["unassigned_session_count"] == 0
+    ) or (
+        result["prototype_status"] == "information_required"
+        and result["unassigned_session_count"] > 0
+    )
+    result["extreme_alert_contract_passed"] = (
+        result["automatic_exception_applied"] is False
+        and (
+            result["extreme_case_active"] is False
+            or "EXTREME_EXTRA_COMPENSATION_DAY_REQUIRED"
+            in result["extreme_case_alert_codes"]
+        )
+    )
     result["overall_passed"] = all(
         [
-            result["prototype_status"] == "success",
-            result["affected_session_count"] == result["proposed_session_count"],
-            result["unassigned_session_count"] == 0,
+            result["prototype_outcome_accounted_for"],
+            result["prototype_status_consistent"],
+            result["extreme_alert_contract_passed"],
             result["prototype_passed_supported_conflict_checks"],
             result["combined_validation_complete"] is True,
             not result["combined_source_errors"],
             not result["combined_extraction_errors"],
             result["source_files_modified"] is False,
+            result["student_group_day_off_violation_count"] == 0,
         ]
     )
     print(json.dumps(result, ensure_ascii=False, indent=2, default=str))

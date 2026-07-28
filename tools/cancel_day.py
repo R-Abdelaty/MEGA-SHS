@@ -26,6 +26,7 @@ MAX_CHARS_PER_CALL = 120_000
 MAX_PAGES = 100
 MAX_RESULT_LIMIT = 100
 TEACHING_WEEK_MAX = 12
+EXAM_ESCALATION_LEAD_WEEKS = 1
 MAX_PROTOTYPE_CACHE_ENTRIES = 4
 _PROTOTYPE_CACHE: dict[str, dict[str, Any]] = {}
 _PROGRESS_REPORTER: Callable[[str, int | None, int | None], None] | None = None
@@ -128,7 +129,13 @@ ALIASES: dict[str, set[str]] = {
     },
     "course_id": {"courseid", "coursecode", "moduleid", "modulecode"},
     "course_name": {"coursename", "subject", "subjectname", "modulename"},
-    "session_type": {"sessiontype", "activitytype", "assessmenttype", "type"},
+    "session_type": {
+        "sessiontype",
+        "activitytype",
+        "assessmenttype",
+        "examtype",
+        "type",
+    },
     "day": {"day", "weekday", "dayofweek", "sessionday"},
     "period": {"period", "slot", "timeslot"},
     "period_id": {"periodid", "periodcode"},
@@ -247,6 +254,20 @@ def _split(value: Any) -> list[str]:
             seen.add(key)
             result.append(text)
     return result
+
+
+def _major_values(record: dict[str, Any]) -> list[str]:
+    """Return every declared major name and code in deterministic order."""
+    mapped = _record_map(record)
+    values: list[str] = []
+    seen: set[str] = set()
+    for key in ("major", "majors", "majorcode", "majorcodes"):
+        for item in _split(mapped.get(key)):
+            identity = _identity(item)
+            if identity and identity not in seen:
+                seen.add(identity)
+                values.append(item)
+    return values
 
 
 def _parse_day(value: Any) -> str:
@@ -595,7 +616,7 @@ def _normalise_session(record: dict[str, Any]) -> dict[str, Any]:
         "expected_students": expected,
         "student_groups": groups,
         "staff": staff,
-        "majors": _split(_value(record, "major")),
+        "majors": _major_values(record),
         "year": _number(_value(record, "year")),
         "raw": record,
     }
@@ -675,7 +696,7 @@ def _exam_indexes(rows: list[dict[str, Any]]) -> tuple[dict, dict]:
             continue
         key = (week, day, start, end)
         year = _number(_value(row, "year"))
-        for major in _split(_value(row, "major")):
+        for major in _major_values(row):
             majors[key].add((_identity(major), year))
         groups[key].update(_identity(item) for item in _split(_value(row, "student_groups")))
     return majors, groups
@@ -698,6 +719,160 @@ def _overlaps_exam(
         if major in session_majors and (year is None or session["year"] is None or year == session["year"]):
             return True
     return False
+
+
+def _major_exam_kind(row: dict[str, Any]) -> str | None:
+    """Classify only assessments that justify an extreme-case escalation."""
+    assessment_type = _identity(_value(row, "session_type"))
+    if "final" in assessment_type:
+        return "final_exam"
+    if "midterm" in assessment_type or "mid-term" in assessment_type:
+        return "midterm_exam"
+    if "major" in assessment_type and "exam" in assessment_type:
+        return "major_exam"
+    return None
+
+
+def _relevant_major_exams(
+    session: dict[str, Any],
+    exam_rows: list[dict[str, Any]],
+    academic_week: int,
+    latest_candidate_week: int,
+) -> list[dict[str, Any]]:
+    """Return nearby major assessments that apply to one affected session."""
+    session_groups = {_identity(item) for item in session["student_groups"]}
+    session_majors = {_identity(item) for item in session["majors"]}
+    relevant: list[dict[str, Any]] = []
+    for row in exam_rows:
+        kind = _major_exam_kind(row)
+        exam_week = _week(_value(row, "week"))
+        if kind is None or exam_week is None or exam_week < academic_week:
+            continue
+        if kind == "final_exam":
+            is_close = (
+                latest_candidate_week >= TEACHING_WEEK_MAX
+                and exam_week > TEACHING_WEEK_MAX
+            )
+        else:
+            is_close = exam_week <= latest_candidate_week + EXAM_ESCALATION_LEAD_WEEKS
+        if not is_close:
+            continue
+
+        exam_groups = {_identity(item) for item in _split(_value(row, "student_groups"))}
+        exam_majors = {_identity(item) for item in _major_values(row)}
+        exam_year = _number(_value(row, "year"))
+        group_match = bool(session_groups & exam_groups)
+        major_match = bool(session_majors & exam_majors) and (
+            exam_year is None
+            or session["year"] is None
+            or exam_year == session["year"]
+        )
+        if not group_match and not major_match:
+            continue
+        try:
+            exam_day = _parse_day(_value(row, "day"))
+        except CancellationInputError:
+            exam_day = str(_value(row, "day") or "").strip() or None
+        relevant.append(
+            {
+                "assessment_id": _value(row, "session_key"),
+                "assessment_type": str(_value(row, "session_type") or "").strip(),
+                "classification": kind,
+                "course_id": _value(row, "course_id"),
+                "course_name": _value(row, "course_name"),
+                "academic_week": exam_week,
+                "day": exam_day,
+            }
+        )
+    relevant.sort(
+        key=lambda item: (
+            item["academic_week"],
+            DAY_ORDER.get(str(item.get("day") or "").casefold(), 99),
+            _identity(item.get("assessment_id")),
+        )
+    )
+    return relevant
+
+
+def _extreme_case_alerts(
+    unassigned: list[dict[str, Any]],
+    normalized_by_key: dict[str, dict[str, Any]],
+    exam_rows: list[dict[str, Any]],
+    academic_week: int,
+    target_weeks: list[int],
+) -> list[dict[str, Any]]:
+    """Describe exception decisions without scheduling either exception."""
+    if not unassigned or not target_weeks:
+        return []
+    latest_candidate_week = max(target_weeks)
+    affected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in unassigned:
+        key = _identity(item.get("session_key"))
+        if not key or key in seen or key not in normalized_by_key:
+            continue
+        seen.add(key)
+        session = normalized_by_key[key]
+        exams = _relevant_major_exams(
+            session,
+            exam_rows,
+            academic_week,
+            latest_candidate_week,
+        )
+        if not exams:
+            continue
+        affected.append(
+            {
+                "session_id": session["session_key"],
+                "session_type": session["session_type"],
+                "student_groups": session["student_groups"],
+                "nearby_major_assessments": exams,
+                "day_off_rejections": int(
+                    (item.get("rejection_counts") or {}).get(
+                        "student_group_day_off", 0
+                    )
+                ),
+            }
+        )
+    if not affected:
+        return []
+
+    alerts: list[dict[str, Any]] = []
+    day_off_affected = [item for item in affected if item["day_off_rejections"] > 0]
+    if day_off_affected:
+        alerts.append(
+            {
+                "code": "EXTREME_DAY_OFF_AUTHORIZATION_REQUIRED",
+                "severity": "critical",
+                "title": "Major assessment is near; a day-off exception may be required",
+                "message": (
+                    "The listed sessions could not be placed under the normal student-day "
+                    "rules before a nearby midterm, major exam, or final. If the institution "
+                    "chooses the day-off exception path, the listed groups would have to "
+                    "attend on a normal day off. No day-off session was scheduled automatically."
+                ),
+                "affected_sessions": day_off_affected,
+                "requires_explicit_authorization": True,
+                "automatic_schedule_change": False,
+            }
+        )
+    alerts.append(
+        {
+            "code": "EXTREME_EXTRA_COMPENSATION_DAY_REQUIRED",
+            "severity": "critical",
+            "title": "Additional official compensation day is required",
+            "message": (
+                "No valid placement was found in the permitted compensation window for "
+                "the listed sessions before a nearby midterm, major exam, or final. The "
+                "institution must designate and approve an additional compensation day. "
+                "The tool did not create or apply that day."
+            ),
+            "affected_sessions": affected,
+            "requires_explicit_authorization": True,
+            "automatic_schedule_change": False,
+        }
+    )
+    return alerts
 
 
 def _prototype_id(disruption_id: str, assignments: list[dict[str, Any]]) -> str:
@@ -912,8 +1087,9 @@ def cancel_day(
     Compensation can begin on the next teaching day after the cancellation. The
     remaining teaching days of the cancelled week are considered first, followed
     by at most the next one or two teaching weeks. Earlier eligible slots are
-    preferred, while existing participant campus days are favored over creating a
-    new day. The result is a prototype only: no
+    preferred. A compensation day must already be a normal scheduled weekday for
+    every student group attached to the session; a group day off is never used.
+    Existing staff campus days are preferred. The result is a prototype only: no
     uploaded workbook is edited, no cancellation is applied, and no repair is
     approved. Detailed timetable rows are paginated with ``result_offset`` and
     ``result_limit``. ``display_academic_week`` and ``display_day`` select a
@@ -1089,9 +1265,13 @@ def cancel_day(
         general_rows, general_retrieval = _retrieve_all(
             general_schedule_file.strip(), sheet_name.strip()
         )
-        exam_rows, exam_retrieval = _retrieve_all(
+        regular_exam_rows, regular_exam_retrieval = _retrieve_all(
             exam_schedule_file.strip(), "Regular Assessments"
         )
+        final_exam_rows, final_exam_retrieval = _retrieve_all(
+            exam_schedule_file.strip(), "Final Exams"
+        )
+        exam_rows = [*regular_exam_rows, *final_exam_rows]
         doctor_rows, doctor_retrieval = _retrieve_all(
             staff_schedule_file.strip(), "Doctor Directory"
         )
@@ -1156,11 +1336,26 @@ def cancel_day(
         session_groups = {_identity(value) for value in session["student_groups"]}
         session_staff = {_identity(value) for value in session["staff"]}
         candidates: list[tuple[float, int, str, dict[str, Any]]] = []
+        local_rejections: Counter[str] = Counter()
         for target_week, eligible_days in candidate_week_days:
             for target_day in eligible_days:
+                groups_on_day_off = {
+                    group
+                    for group in session_groups
+                    if target_day not in group_days.get(group, set())
+                }
+                if groups_on_day_off:
+                    rejected_slots = max(
+                        1,
+                        sum(
+                            period["duration"] == session["duration"]
+                            for period in periods
+                        ),
+                    )
+                    rejection_totals["student_group_day_off"] += rejected_slots
+                    local_rejections["student_group_day_off"] += rejected_slots
+                    continue
                 new_day_count = sum(
-                    target_day not in group_days.get(group, set()) for group in session_groups
-                ) + sum(
                     target_day not in staff_days.get(member, set()) for member in session_staff
                 )
                 daily_load = sum(
@@ -1201,7 +1396,6 @@ def cancel_day(
         candidates.sort(key=lambda item: (item[0], item[1], DAY_ORDER[item[2].casefold()], item[3]["start_minutes"]))
 
         chosen: dict[str, Any] | None = None
-        local_rejections: Counter[str] = Counter()
         for _score, target_week, target_day, period in candidates:
             slot_key = (target_week, target_day, period["start"], period["end"])
             if slot_key not in room_cache:
@@ -1277,7 +1471,11 @@ def cancel_day(
                     "session_key": session["session_key"],
                     "repair_order": order,
                     "session_type": session["session_type"],
-                    "reason": "No conflict-screened staff-and-room placement was found in the permitted compensation window.",
+                    "reason": (
+                        "No placement satisfying student-group teaching-day, staff, "
+                        "room, and assessment constraints was found in the permitted "
+                        "compensation window."
+                    ),
                     "rejection_counts": dict(sorted(local_rejections.items())),
                 }
             )
@@ -1516,6 +1714,13 @@ def cancel_day(
     complete = len(assignments) == len(affected) and not unassigned
     status = "success" if complete else "information_required"
     disruption_id = report_payload["disruption_report"]["disruption_id"]
+    extreme_case_alerts = _extreme_case_alerts(
+        unassigned,
+        normalized_by_key,
+        exam_rows,
+        academic_week,
+        target_weeks,
+    )
     response = {
             "status": status,
             "prototype_complete": complete,
@@ -1554,6 +1759,12 @@ def cancel_day(
             },
             "unassigned_session_count": len(unassigned),
             "unassigned_sessions": unassigned[:100],
+            "extreme_case": {
+                "active": bool(extreme_case_alerts),
+                "alerts": extreme_case_alerts,
+                "normal_constraints_remain_enforced": True,
+                "automatic_exception_applied": False,
+            },
             "constraint_summary": {
                 "priority_order_applied": "Exam/Quiz > Lecture > Laboratory > Tutorial",
                 "following_week_limit": maximum_following_weeks,
@@ -1561,6 +1772,9 @@ def cancel_day(
                 "same_or_earlier_cancelled_week_days_allowed": False,
                 "earlier_eligible_slots_preferred": True,
                 "existing_participant_days_preferred": True,
+                "student_group_existing_day_required": True,
+                "student_group_days_off_allowed": False,
+                "existing_staff_days_preferred": True,
                 "base_student_conflicts_allowed": False,
                 "base_staff_conflicts_allowed": False,
                 "compensation_conflicts_allowed": False,
@@ -1580,7 +1794,10 @@ def cancel_day(
                 ],
                 "affected_retrieval": affected_retrieval,
                 "general_schedule_retrieval": general_retrieval,
-                "exam_schedule_retrieval": exam_retrieval,
+                "exam_schedule_retrieval": {
+                    "regular_assessments": regular_exam_retrieval,
+                    "final_exams": final_exam_retrieval,
+                },
                 "doctor_directory_retrieval": doctor_retrieval,
                 "known_doctor_count": len(known_doctors),
                 "staff_availability_checks": len(staff_cache),
@@ -1597,7 +1814,10 @@ def cancel_day(
                 ),
             },
             "required_action": (
-                "Review the unassigned sessions and constraints before confirmation."
+                "Review the extreme-case alerts and obtain explicit institutional authorization; "
+                "no day-off session or additional compensation day has been scheduled."
+                if extreme_case_alerts
+                else "Review the unassigned sessions and constraints before confirmation."
                 if not complete
                 else "Review all prototype timetable pages before deciding whether to confirm this proposal."
             ),
