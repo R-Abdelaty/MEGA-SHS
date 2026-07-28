@@ -1,4 +1,4 @@
-"""Contract tests for the UI-facing ASGI API."""
+"""Contract tests for the UI-facing FastAPI application."""
 
 from __future__ import annotations
 
@@ -7,7 +7,8 @@ import os
 import unittest
 from unittest.mock import patch
 
-from starlette.testclient import TestClient
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 import api
 from api import DisruptionForm, disruption_arguments
@@ -50,6 +51,39 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(options["problem_types"][0]["value"], "lecturer_or_ta_unavailable")
         self.assertEqual(options["periods"][4]["period_id"], "P5")
         self.assertEqual(options["academic_weeks"][-1]["option"], 12)
+        self.assertNotIn("cancellation_reasons", options)
+
+    def test_fastapi_exposes_interactive_docs_and_typed_openapi(self) -> None:
+        self.assertIsInstance(api.app, FastAPI)
+        client = TestClient(api.app)
+
+        docs = client.get("/docs")
+        redoc = client.get("/redoc")
+        openapi = client.get("/openapi.json")
+
+        self.assertEqual(docs.status_code, 200)
+        self.assertEqual(redoc.status_code, 200)
+        self.assertEqual(openapi.status_code, 200)
+        schema = openapi.json()
+        self.assertEqual(
+            schema["info"]["title"],
+            "Self-Healing University Scheduler API",
+        )
+        self.assertEqual(
+            schema["components"]["securitySchemes"]["APIKeyHeader"],
+            {"type": "apiKey", "in": "header", "name": "X-API-Key"},
+        )
+        self.assertEqual(
+            schema["paths"]["/api/v1/options"]["get"]["security"],
+            [{"APIKeyHeader": []}],
+        )
+        request_schema = schema["paths"][
+            "/api/v1/prototypes/cancel-day"
+        ]["post"]["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(
+            request_schema["$ref"],
+            "#/components/schemas/CancelDayPrototypeForm",
+        )
 
     def test_numeric_partial_day_form_maps_to_tool_arguments(self) -> None:
         arguments = disruption_arguments(
@@ -57,7 +91,6 @@ class ApiTests(unittest.TestCase):
                 problem_option=5,
                 day_option=3,
                 academic_week=2,
-                reason_option=5,
                 scope_option=2,
                 start_period_option=1,
                 end_period_option=2,
@@ -81,6 +114,21 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(unauthorized.status_code, 401)
         self.assertEqual(authorized.status_code, 200)
         self.assertEqual(authorized.json()["api_version"], "v1")
+
+    def test_fastapi_validation_uses_the_stable_error_envelope(self) -> None:
+        client = TestClient(api.app)
+        with patch.dict(os.environ, {"SCHEDULER_UI_API_KEY": "test-secret"}):
+            response = client.post(
+                "/api/v1/prototypes/cancel-day",
+                headers={"X-API-Key": "test-secret"},
+                json={"day_option": 9, "unexpected": True},
+            )
+
+        self.assertEqual(response.status_code, 422)
+        payload = response.json()
+        self.assertEqual(payload["status"], "error")
+        self.assertEqual(payload["error"]["code"], "invalid_request_body")
+        self.assertTrue(payload["error"]["details"])
 
     def test_intake_starts_with_only_the_day_question(self) -> None:
         client = TestClient(api.app)
@@ -119,8 +167,7 @@ class ApiTests(unittest.TestCase):
             expected_questions = [
                 (2, "academic_week"),
                 (1, "problem_option"),
-                (4, "reason_option"),
-                (1, "confirmation_option"),
+                (4, "confirmation_option"),
             ]
             for option, expected_question in expected_questions:
                 response = client.post(
@@ -146,7 +193,10 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(len(fake.calls), 1)
         self.assertEqual(fake.calls[0]["day"], "Monday")
         self.assertEqual(fake.calls[0]["academic_week"], 1)
-        self.assertEqual(fake.calls[0]["reason"], "University event/day off")
+        self.assertEqual(
+            fake.calls[0]["reason"],
+            "Confirmed full university day cancellation.",
+        )
 
     def test_cancelled_intake_never_executes_a_tool(self) -> None:
         client = TestClient(api.app)
@@ -159,7 +209,7 @@ class ApiTests(unittest.TestCase):
             intake_id = client.post("/api/v1/intake/start", headers=headers).json()[
                 "intake_id"
             ]
-            for option in (1, 1, 4, 1):
+            for option in (1, 1, 4):
                 response = client.post(
                     f"/api/v1/intake/{intake_id}/answer",
                     headers=headers,
@@ -191,7 +241,6 @@ class ApiTests(unittest.TestCase):
                 json={
                     "day_option": 1,
                     "academic_week": 1,
-                    "reason_option": 1,
                     "confirmation_option": 1,
                 },
             )

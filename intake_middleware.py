@@ -9,7 +9,6 @@ from typing import Any
 
 from api_contract import (
     ASSESSMENT_TYPES,
-    CANCELLATION_REASONS,
     CONFIRMATIONS,
     DAYS,
     PERIODS,
@@ -175,15 +174,6 @@ def _question(key: str, answers: dict[str, Any]) -> dict[str, Any]:
             "input_type": "single_select",
             "options": _static_options(PERIODS),
         }
-    if key == "reason_option":
-        return {
-            "key": key,
-            "prompt": "Select the cancellation reason.",
-            "input_type": "single_select",
-            "options": _static_options(CANCELLATION_REASONS),
-        }
-    if key == "custom_reason":
-        return {"key": key, "prompt": "Enter the cancellation reason.", "input_type": "text"}
     if key == "assessment_option":
         return {
             "key": key,
@@ -222,10 +212,7 @@ def _problem_steps(answers: dict[str, Any]) -> list[str]:
             steps.append("end_period_option")
         return [*steps, "confirmation_option"]
     if problem == 4:
-        steps = ["reason_option"]
-        if answers.get("reason_option") == 7:
-            steps.append("custom_reason")
-        return [*steps, "confirmation_option"]
+        return ["confirmation_option"]
     if problem == 5:
         steps = ["scope_option"]
         scope = answers.get("scope_option")
@@ -233,9 +220,6 @@ def _problem_steps(answers: dict[str, Any]) -> list[str]:
             steps.append("start_period_option")
         if scope == 2:
             steps.append("end_period_option")
-        steps.append("reason_option")
-        if answers.get("reason_option") == 7:
-            steps.append("custom_reason")
         return [*steps, "confirmation_option"]
     if problem == 6:
         return ["session_options", "confirmation_option"]
@@ -274,7 +258,7 @@ def _next_key(answers: dict[str, Any]) -> str | None:
 
 
 def _validate_answer(key: str, answer: dict[str, Any], answers: dict[str, Any]) -> Any:
-    if key in {"custom_reason", "related_repair_id", "description"}:
+    if key in {"related_repair_id", "description"}:
         value = str(answer.get("text") or "").strip()
         if not value:
             raise ValueError("A nonempty text value is required.")
@@ -319,8 +303,6 @@ def _validate_answer(key: str, answer: dict[str, Any], answers: dict[str, Any]) 
         valid_options = {1, 2} if answers.get("problem_option") == 5 else set(TIME_SCOPES)
     elif key in {"start_period_option", "end_period_option"}:
         valid_options = set(PERIODS)
-    elif key == "reason_option":
-        valid_options = set(CANCELLATION_REASONS)
     elif key == "assessment_option":
         valid_options = set(ASSESSMENT_TYPES)
     elif key == "confirmation_option":

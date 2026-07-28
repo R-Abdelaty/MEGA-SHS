@@ -1,10 +1,23 @@
-# Scheduler UI API
+# Scheduler UI FastAPI
+
+The backend is a FastAPI application with typed Pydantic request bodies,
+validated path/query parameters, and an OpenAPI API-key security definition.
 
 Run the API from the repository root:
 
 ```powershell
 python -m uvicorn api:app --host 127.0.0.1 --port 8000 --reload
 ```
+
+Development documentation is available while the server is running:
+
+- Swagger UI: `http://127.0.0.1:8000/docs`
+- ReDoc: `http://127.0.0.1:8000/redoc`
+- OpenAPI JSON: `http://127.0.0.1:8000/openapi.json`
+
+The documentation pages and schema are public so development tools can load
+them. Every `/api/v1` operation remains protected by the documented
+`X-API-Key` security scheme.
 
 Copy `.env.example` to `.env` and set both backend keys. The browser sends only
 `SCHEDULER_UI_API_KEY` through the `X-API-Key` header. Never expose
@@ -81,7 +94,7 @@ POST /api/v1/intake/INTAKE-.../answer
 The fixed first three questions are **Day**, **Academic week**, then **Problem**.
 After Problem, the middleware returns only the details relevant to that problem.
 For a multi-select catalog use `{"options": [1, 3]}`; for a positive number use
-`{"number": 80}`; for free text use `{"text": "reason"}`.
+`{"number": 80}`; for required free text use `{"text": "explanation"}`.
 
 No disruption, repair, or scheduling tool runs while `status` is `collecting`.
 The selected workflow runs exactly once only after the final confirmation answer
@@ -93,7 +106,6 @@ is option `1`. Confirmation option `2` cancels the intake and runs nothing.
 {
   "day_option": 2,
   "academic_week": 1,
-  "reason_option": 1,
   "confirmation_option": 1,
   "maximum_following_weeks": 2,
   "result_offset": 0,

@@ -210,13 +210,15 @@ REPAIR WORKFLOW
 HOW TO USE CANCEL_DAY
 - For a confirmed whole-day cancellation, call cancel_day as the parent
   orchestrator instead of manually coordinating hundreds of individual tool
-  calls. Supply the exact academic week, reason, and authoritative general,
-  staff, room, and exam schedule file names.
+  calls. Supply the exact academic week, a neutral internal cancellation
+  description, and the authoritative general, staff, room, and exam schedule
+  file names. Do not ask the user to classify the cancellation reason.
 - A weekday plus an academic week is a complete time scope. Do not ask for a
   semester, academic year, or calendar date when those two values are present.
-- The mandatory user inputs are the cancelled day, academic week, reason, and
+- The mandatory user inputs are the cancelled day, academic week, and
   confirmation that the cancellation scope is approved. Schedule file names
-  have authoritative defaults and must not be requested from the user.
+  and the neutral internal description have authoritative defaults and must not
+  be requested from the user.
 - Treat an affirmative UI selection or direct confirmed cancellation command as
   cancellation_approved=true. This authorizes only the read-only prototype; it
   is not approval to apply a repaired timetable.

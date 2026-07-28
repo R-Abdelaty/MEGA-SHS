@@ -48,16 +48,6 @@ PERIODS = {
     5: {"period_id": "P5", "label": "5th Period", "start": "15:45", "end": "17:15"},
 }
 
-CANCELLATION_REASONS = {
-    1: "University event/day off",
-    2: "Public holiday",
-    3: "Emergency closure",
-    4: "Severe weather",
-    5: "Facility maintenance",
-    6: "Safety incident",
-    7: "Other",
-}
-
 ASSESSMENT_TYPES = {1: "Exam", 2: "Quiz", 3: "Lab test"}
 URGENCIES = {1: "critical", 2: "high", 3: "normal", 4: "low"}
 CONFIRMATIONS = {1: "create_prototype", 2: "cancel_request"}
@@ -66,8 +56,8 @@ REQUIRED_FIELDS = {
     1: ["day_option", "academic_week", "resource_options", "scope_option"],
     2: ["day_option", "academic_week", "resource_options", "scope_option"],
     3: ["day_option", "academic_week", "resource_options", "scope_option"],
-    4: ["day_option", "academic_week", "reason_option", "confirmation_option"],
-    5: ["day_option", "academic_week", "scope_option", "reason_option"],
+    4: ["day_option", "academic_week", "confirmation_option"],
+    5: ["day_option", "academic_week", "scope_option", "confirmation_option"],
     6: ["session_options"],
     7: ["day_option", "academic_week", "resource_options", "scope_option"],
     8: ["day_option", "academic_week", "assessment_option", "student_group_options", "start_period_option"],
@@ -104,7 +94,6 @@ def ui_options() -> dict[str, Any]:
         ],
         "time_scopes": _option_rows(TIME_SCOPES),
         "periods": _option_rows(PERIODS),
-        "cancellation_reasons": _option_rows(CANCELLATION_REASONS),
         "assessment_types": _option_rows(ASSESSMENT_TYPES),
         "urgencies": _option_rows(URGENCIES),
         "confirmations": _option_rows(CONFIRMATIONS),

@@ -1,4 +1,4 @@
-"""Authenticated ASGI API used by the scheduler UI."""
+"""Authenticated FastAPI application used by the scheduler UI."""
 
 from __future__ import annotations
 
@@ -10,17 +10,15 @@ import threading
 from typing import Any
 
 from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from starlette.applications import Starlette
-from starlette.middleware import Middleware
-from starlette.middleware.cors import CORSMiddleware
-from starlette.requests import Request
-from starlette.responses import JSONResponse
-from starlette.routing import Route
+from fastapi import Depends, FastAPI, Path, Query, Request, Security
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import APIKeyHeader
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field
 
 from api_contract import (
     ASSESSMENT_TYPES,
-    CANCELLATION_REASONS,
     CONFIRMATIONS,
     PERIODS,
     PROBLEM_TYPES,
@@ -41,6 +39,8 @@ load_dotenv()
 API_PREFIX = "/api/v1"
 _PROTOTYPE_REQUESTS: dict[str, dict[str, Any]] = {}
 _PROTOTYPE_LOCK = threading.Lock()
+_API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
+FULL_DAY_CANCELLATION_DESCRIPTION = "Confirmed full university day cancellation."
 
 
 class StrictModel(BaseModel):
@@ -52,8 +52,6 @@ class DisruptionForm(StrictModel):
     day_option: int | None = None
     academic_week: int | None = Field(default=None, ge=1, le=12)
     description: str | None = None
-    reason_option: int | None = None
-    custom_reason: str | None = None
     resource_catalog: str | None = None
     resource_options: list[int] = Field(default_factory=list)
     resource_values: list[str] = Field(default_factory=list)
@@ -74,8 +72,6 @@ class DisruptionForm(StrictModel):
 class CancelDayPrototypeForm(StrictModel):
     day_option: int
     academic_week: int = Field(ge=1, le=12)
-    reason_option: int
-    custom_reason: str | None = None
     confirmation_option: int = 1
     maximum_following_weeks: int = Field(default=2, ge=1, le=2)
     result_offset: int = Field(default=0, ge=0)
@@ -116,38 +112,38 @@ def _error(status_code: int, code: str, message: str, details: Any = None) -> JS
     return JSONResponse(payload, status_code=status_code)
 
 
-def _authenticate(request: Request) -> JSONResponse | None:
+class SchedulerAPIError(Exception):
+    """An expected API error with the scheduler's stable JSON envelope."""
+
+    def __init__(
+        self,
+        status_code: int,
+        code: str,
+        message: str,
+        details: Any = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
+        self.message = message
+        self.details = details
+
+
+def require_api_key(api_key: str | None = Security(_API_KEY_HEADER)) -> None:
+    """Authenticate every versioned endpoint and document it in OpenAPI."""
     expected = os.getenv("SCHEDULER_UI_API_KEY", "").strip()
     if not expected:
-        return _error(
+        raise SchedulerAPIError(
             503,
             "api_key_not_configured",
             "Set SCHEDULER_UI_API_KEY on the backend before serving the UI.",
         )
-    provided = request.headers.get("x-api-key", "")
-    if not provided or not secrets.compare_digest(provided, expected):
-        return _error(401, "unauthorized", "A valid X-API-Key header is required.")
-    return None
-
-
-async def _body(request: Request, model: type[StrictModel]) -> StrictModel | JSONResponse:
-    try:
-        return model.model_validate(await request.json())
-    except (ValidationError, json.JSONDecodeError) as exc:
-        details = exc.errors() if isinstance(exc, ValidationError) else str(exc)
-        return _error(422, "invalid_request_body", "The JSON body is invalid.", details)
-
-
-def _reason(option: int | None, custom: str | None) -> str | None:
-    if option is None:
-        return None
-    if option not in CANCELLATION_REASONS:
-        raise ValueError("reason_option must be between 1 and 7")
-    if option == 7:
-        if not custom or not custom.strip():
-            raise ValueError("custom_reason is required when reason_option is 7")
-        return custom.strip()
-    return CANCELLATION_REASONS[option]
+    if not api_key or not secrets.compare_digest(api_key, expected):
+        raise SchedulerAPIError(
+            401,
+            "unauthorized",
+            "A valid X-API-Key header is required.",
+        )
 
 
 def _resources(form: DisruptionForm) -> list[str]:
@@ -197,8 +193,7 @@ def disruption_arguments(form: DisruptionForm) -> dict[str, Any]:
     if form.confirmation_option == 2:
         raise ValueError("The request was cancelled by the user")
     label, disruption_type = PROBLEM_TYPES[form.problem_option]
-    reason = _reason(form.reason_option, form.custom_reason)
-    description = (form.description or reason or label).strip()
+    description = (form.description or label).strip()
     if form.assessment_option is not None:
         if form.assessment_option not in ASSESSMENT_TYPES:
             raise ValueError("assessment_option must be between 1 and 3")
@@ -228,7 +223,7 @@ def disruption_arguments(form: DisruptionForm) -> dict[str, Any]:
     }
 
 
-async def health(_: Request) -> JSONResponse:
+async def health() -> JSONResponse:
     return JSONResponse(
         {
             "status": "ok",
@@ -239,23 +234,17 @@ async def health(_: Request) -> JSONResponse:
     )
 
 
-async def options_endpoint(request: Request) -> JSONResponse:
-    if error := _authenticate(request):
-        return error
+async def options_endpoint() -> JSONResponse:
     return JSONResponse(ui_options())
 
 
-async def intake_start_endpoint(request: Request) -> JSONResponse:
-    if error := _authenticate(request):
-        return error
+async def intake_start_endpoint() -> JSONResponse:
     return JSONResponse(start_intake(), status_code=201)
 
 
-async def intake_status_endpoint(request: Request) -> JSONResponse:
-    if error := _authenticate(request):
-        return error
+async def intake_status_endpoint(intake_id: str) -> JSONResponse:
     try:
-        return JSONResponse(get_intake(request.path_params["intake_id"]))
+        return JSONResponse(get_intake(intake_id))
     except KeyError:
         return _error(404, "intake_not_found", "The intake session does not exist.")
 
@@ -272,8 +261,6 @@ def _wizard_disruption_form(answers: dict[str, Any]) -> DisruptionForm:
         day_option=answers.get("day_option"),
         academic_week=answers.get("academic_week"),
         description=answers.get("description"),
-        reason_option=answers.get("reason_option"),
-        custom_reason=answers.get("custom_reason"),
         resource_catalog=resource_catalog,
         resource_options=answers.get("resource_options", []),
         session_options=answers.get("session_options", []),
@@ -294,7 +281,7 @@ async def execute_ready_intake(snapshot: dict[str, Any]) -> dict[str, Any]:
         arguments = {
             "day": resolve_day(answers["day_option"]),
             "academic_week": answers["academic_week"],
-            "reason": _reason(answers["reason_option"], answers.get("custom_reason")),
+            "reason": FULL_DAY_CANCELLATION_DESCRIPTION,
             "cancellation_approved": True,
             "maximum_following_weeks": 2,
             "result_offset": 0,
@@ -310,15 +297,13 @@ async def execute_ready_intake(snapshot: dict[str, Any]) -> dict[str, Any]:
     return _json_tool_result(await asyncio.to_thread(report_disruption.invoke, arguments))
 
 
-async def intake_answer_endpoint(request: Request) -> JSONResponse:
-    if error := _authenticate(request):
-        return error
-    body = await _body(request, IntakeAnswer)
-    if isinstance(body, JSONResponse):
-        return body
+async def intake_answer_endpoint(
+    body: IntakeAnswer,
+    intake_id: str,
+) -> JSONResponse:
     try:
         snapshot = answer_intake(
-            request.path_params["intake_id"],
+            intake_id,
             body.model_dump(exclude_none=True),
         )
         if snapshot["status"] == "cancelled":
@@ -332,26 +317,28 @@ async def intake_answer_endpoint(request: Request) -> JSONResponse:
         return _error(400, "invalid_intake_answer", str(exc))
 
 
-async def catalog_endpoint(request: Request) -> JSONResponse:
-    if error := _authenticate(request):
-        return error
+async def catalog_endpoint(
+    catalog_name: str,
+    day_option: int | None = Query(default=None, ge=1, le=5),
+    query: str = Query(default="", max_length=200),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=100),
+) -> JSONResponse:
     try:
-        items = catalog(request.path_params["catalog_name"])
-        day = resolve_day(int(request.query_params["day_option"])) if request.query_params.get("day_option") else None
-        if day and request.path_params["catalog_name"].casefold() == "sessions":
+        items = catalog(catalog_name)
+        day = resolve_day(day_option)
+        if day and catalog_name.casefold() == "sessions":
             items = [item for item in items if str(item.get("day") or "").casefold() == day.casefold()]
-        query = request.query_params.get("query", "").strip().casefold()
-        if query:
-            items = [item for item in items if query in str(item.get("label") or "").casefold()]
-        offset = max(0, int(request.query_params.get("offset", "0")))
-        limit = min(100, max(1, int(request.query_params.get("limit", "100"))))
+        normalized_query = query.strip().casefold()
+        if normalized_query:
+            items = [item for item in items if normalized_query in str(item.get("label") or "").casefold()]
     except (ValueError, KeyError) as exc:
         return _error(400, "invalid_catalog_request", str(exc))
     page = items[offset : offset + limit]
     return JSONResponse(
         {
             "status": "success",
-            "catalog": request.path_params["catalog_name"],
+            "catalog": catalog_name,
             "total": len(items),
             "returned": len(page),
             "options": page,
@@ -365,12 +352,7 @@ async def catalog_endpoint(request: Request) -> JSONResponse:
     )
 
 
-async def report_endpoint(request: Request) -> JSONResponse:
-    if error := _authenticate(request):
-        return error
-    body = await _body(request, DisruptionForm)
-    if isinstance(body, JSONResponse):
-        return body
+async def report_endpoint(body: DisruptionForm) -> JSONResponse:
     try:
         arguments = disruption_arguments(body)
         result = await asyncio.to_thread(report_disruption.invoke, arguments)
@@ -379,12 +361,7 @@ async def report_endpoint(request: Request) -> JSONResponse:
         return _error(400, "invalid_disruption_options", str(exc))
 
 
-async def cancel_day_endpoint(request: Request) -> JSONResponse:
-    if error := _authenticate(request):
-        return error
-    body = await _body(request, CancelDayPrototypeForm)
-    if isinstance(body, JSONResponse):
-        return body
+async def cancel_day_endpoint(body: CancelDayPrototypeForm) -> JSONResponse:
     try:
         if body.confirmation_option not in CONFIRMATIONS:
             raise ValueError("confirmation_option must be 1 or 2")
@@ -393,7 +370,7 @@ async def cancel_day_endpoint(request: Request) -> JSONResponse:
         arguments = {
             "day": resolve_day(body.day_option),
             "academic_week": body.academic_week,
-            "reason": _reason(body.reason_option, body.custom_reason),
+            "reason": FULL_DAY_CANCELLATION_DESCRIPTION,
             "cancellation_approved": True,
             "maximum_following_weeks": body.maximum_following_weeks,
             "result_offset": body.result_offset,
@@ -409,24 +386,27 @@ async def cancel_day_endpoint(request: Request) -> JSONResponse:
         return _error(400, "invalid_cancellation_options", str(exc))
 
 
-async def prototype_day_endpoint(request: Request) -> JSONResponse:
-    if error := _authenticate(request):
-        return error
-    prototype_id = request.path_params["prototype_id"]
+async def prototype_day_endpoint(
+    prototype_id: str,
+    academic_week: int = Path(ge=1, le=12),
+    day_option: int = Path(ge=1, le=5),
+    period_option: int | None = Query(default=None, ge=1, le=5),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=100),
+) -> JSONResponse:
     with _PROTOTYPE_LOCK:
         stored = _PROTOTYPE_REQUESTS.get(prototype_id)
     if stored is None:
         return _error(404, "prototype_not_found", "The prototype is not available in this API process.")
     try:
-        period_option_text = request.query_params.get("period_option")
-        period = resolve_period(int(period_option_text)) if period_option_text else None
+        period = resolve_period(period_option)
         arguments = {
             **stored,
-            "display_academic_week": int(request.path_params["academic_week"]),
-            "display_day": resolve_day(int(request.path_params["day_option"])),
+            "display_academic_week": academic_week,
+            "display_day": resolve_day(day_option),
             "display_period_id": period["period_id"] if period else None,
-            "display_offset": max(0, int(request.query_params.get("offset", "0"))),
-            "display_limit": min(100, max(1, int(request.query_params.get("limit", "100")))),
+            "display_offset": offset,
+            "display_limit": limit,
         }
         result = _json_tool_result(await asyncio.to_thread(cancel_day.invoke, arguments))
         return JSONResponse(result)
@@ -434,12 +414,7 @@ async def prototype_day_endpoint(request: Request) -> JSONResponse:
         return _error(400, "invalid_day_view_options", str(exc))
 
 
-async def agent_message_endpoint(request: Request) -> JSONResponse:
-    if error := _authenticate(request):
-        return error
-    body = await _body(request, AgentMessage)
-    if isinstance(body, JSONResponse):
-        return body
+async def agent_message_endpoint(body: AgentMessage) -> JSONResponse:
     try:
         from agent import agent
 
@@ -468,35 +443,106 @@ origins = [
     if item.strip()
 ]
 
-routes = [
-    Route("/health", health, methods=["GET"]),
-    Route(f"{API_PREFIX}/options", options_endpoint, methods=["GET"]),
-    Route(f"{API_PREFIX}/intake/start", intake_start_endpoint, methods=["POST"]),
-    Route(f"{API_PREFIX}/intake/{{intake_id}}", intake_status_endpoint, methods=["GET"]),
-    Route(
-        f"{API_PREFIX}/intake/{{intake_id}}/answer",
-        intake_answer_endpoint,
-        methods=["POST"],
-    ),
-    Route(f"{API_PREFIX}/catalogs/{{catalog_name}}", catalog_endpoint, methods=["GET"]),
-    Route(f"{API_PREFIX}/disruptions/report", report_endpoint, methods=["POST"]),
-    Route(f"{API_PREFIX}/prototypes/cancel-day", cancel_day_endpoint, methods=["POST"]),
-    Route(
-        f"{API_PREFIX}/prototypes/{{prototype_id}}/weeks/{{academic_week:int}}/days/{{day_option:int}}",
-        prototype_day_endpoint,
-        methods=["GET"],
-    ),
-    Route(f"{API_PREFIX}/agent/messages", agent_message_endpoint, methods=["POST"]),
-]
+app = FastAPI(
+    title="Self-Healing University Scheduler API",
+    summary="Read-only disruption intake and timetable repair prototypes.",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "X-API-Key"],
+)
 
-app = Starlette(
-    routes=routes,
-    middleware=[
-        Middleware(
-            CORSMiddleware,
-            allow_origins=origins,
-            allow_methods=["GET", "POST", "OPTIONS"],
-            allow_headers=["Content-Type", "X-API-Key"],
-        )
-    ],
+
+@app.exception_handler(SchedulerAPIError)
+async def scheduler_api_error_handler(
+    _request: Request,
+    exc: SchedulerAPIError,
+) -> JSONResponse:
+    return _error(exc.status_code, exc.code, exc.message, exc.details)
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_error_handler(
+    _request: Request,
+    exc: RequestValidationError,
+) -> JSONResponse:
+    return _error(
+        422,
+        "invalid_request_body",
+        "The request parameters or JSON body are invalid.",
+        exc.errors(),
+    )
+
+
+authenticated = [Depends(require_api_key)]
+app.add_api_route("/health", health, methods=["GET"], tags=["System"])
+app.add_api_route(
+    f"{API_PREFIX}/options",
+    options_endpoint,
+    methods=["GET"],
+    tags=["Options"],
+    dependencies=authenticated,
+)
+app.add_api_route(
+    f"{API_PREFIX}/intake/start",
+    intake_start_endpoint,
+    methods=["POST"],
+    status_code=201,
+    tags=["Intake"],
+    dependencies=authenticated,
+)
+app.add_api_route(
+    f"{API_PREFIX}/intake/{{intake_id}}",
+    intake_status_endpoint,
+    methods=["GET"],
+    tags=["Intake"],
+    dependencies=authenticated,
+)
+app.add_api_route(
+    f"{API_PREFIX}/intake/{{intake_id}}/answer",
+    intake_answer_endpoint,
+    methods=["POST"],
+    tags=["Intake"],
+    dependencies=authenticated,
+)
+app.add_api_route(
+    f"{API_PREFIX}/catalogs/{{catalog_name}}",
+    catalog_endpoint,
+    methods=["GET"],
+    tags=["Options"],
+    dependencies=authenticated,
+)
+app.add_api_route(
+    f"{API_PREFIX}/disruptions/report",
+    report_endpoint,
+    methods=["POST"],
+    tags=["Disruptions"],
+    dependencies=authenticated,
+)
+app.add_api_route(
+    f"{API_PREFIX}/prototypes/cancel-day",
+    cancel_day_endpoint,
+    methods=["POST"],
+    tags=["Prototypes"],
+    dependencies=authenticated,
+)
+app.add_api_route(
+    f"{API_PREFIX}/prototypes/{{prototype_id}}/weeks/{{academic_week}}/days/{{day_option}}",
+    prototype_day_endpoint,
+    methods=["GET"],
+    tags=["Prototypes"],
+    dependencies=authenticated,
+)
+app.add_api_route(
+    f"{API_PREFIX}/agent/messages",
+    agent_message_endpoint,
+    methods=["POST"],
+    tags=["Agent"],
+    dependencies=authenticated,
 )

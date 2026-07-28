@@ -50,8 +50,7 @@ class IntakeMiddlewareTests(unittest.TestCase):
             ({"option": 5}, "scope_option"),
             ({"option": 2}, "start_period_option"),
             ({"option": 2}, "end_period_option"),
-            ({"option": 4}, "reason_option"),
-            ({"option": 5}, "confirmation_option"),
+            ({"option": 4}, "confirmation_option"),
         ]
         for answer, expected_question in sequence:
             state = answer_intake(intake_id, answer)
@@ -75,10 +74,9 @@ class IntakeMiddlewareTests(unittest.TestCase):
             1: [({"option": 1}, "scope_option"), ({"option": 3}, "confirmation_option")],
             2: [({"options": [1]}, "scope_option"), ({"option": 3}, "confirmation_option")],
             3: [({"options": [1]}, "scope_option"), ({"option": 3}, "confirmation_option")],
-            4: [({"option": 1}, "confirmation_option")],
+            4: [],
             5: [
                 ({"option": 1}, "start_period_option"),
-                ({"option": 1}, "reason_option"),
                 ({"option": 1}, "confirmation_option"),
             ],
             6: [({"options": [1]}, "confirmation_option")],
@@ -106,7 +104,7 @@ class IntakeMiddlewareTests(unittest.TestCase):
             1: "resource_options",
             2: "resource_options",
             3: "resource_options",
-            4: "reason_option",
+            4: "confirmation_option",
             5: "scope_option",
             6: "session_options",
             7: "resource_options",

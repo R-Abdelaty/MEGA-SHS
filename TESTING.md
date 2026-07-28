@@ -28,6 +28,9 @@ Run the UI API locally after configuring `.env`:
 python -m uvicorn api:app --host 127.0.0.1 --port 8000 --reload
 ```
 
+The FastAPI contract tests verify `/docs`, `/redoc`, `/openapi.json`, typed
+request schemas, and the documented `X-API-Key` security requirement.
+
 The suite covers every tool that currently has a real implementation:
 
 - `get_schedule`
